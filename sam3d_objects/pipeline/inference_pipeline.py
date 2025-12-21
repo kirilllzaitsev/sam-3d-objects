@@ -1,11 +1,11 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 import os
+from functools import wraps
 
-from tqdm import tqdm
 import torch
 from loguru import logger
-from functools import wraps
 from torch.utils._pytree import tree_map_only
+from tqdm import tqdm
 
 
 def set_attention_backend():
@@ -18,34 +18,31 @@ def set_attention_backend():
         os.environ["ATTN_BACKEND"] = "flash_attn"
         os.environ["SPARSE_ATTN_BACKEND"] = "flash_attn"
 
+
 set_attention_backend()
 
 from typing import List, Union
+
+import numpy as np
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
-import numpy as np
-
 from PIL import Image
-from sam3d_objects.pipeline import preprocess_utils
-from sam3d_objects.data.dataset.tdfy.img_and_mask_transforms import (
-    get_mask,
+from safetensors.torch import load_file
+from sam3d_objects.data.dataset.tdfy.img_and_mask_transforms import get_mask
+from sam3d_objects.model.backbone.tdfy_dit.modules import sparse as sp
+from sam3d_objects.model.backbone.tdfy_dit.utils import postprocessing_utils
+from sam3d_objects.model.io import (
+    filter_and_remove_prefix_state_dict_fn,
+    load_model_from_checkpoint,
 )
+from sam3d_objects.pipeline import preprocess_utils
 from sam3d_objects.pipeline.inference_utils import (
-    get_pose_decoder,
     SLAT_MEAN,
     SLAT_STD,
     downsample_sparse_structure,
+    get_pose_decoder,
     prune_sparse_structure,
 )
-
-from sam3d_objects.model.io import (
-    load_model_from_checkpoint,
-    filter_and_remove_prefix_state_dict_fn,
-)
-
-from sam3d_objects.model.backbone.tdfy_dit.modules import sparse as sp
-from sam3d_objects.model.backbone.tdfy_dit.utils import postprocessing_utils
-from safetensors.torch import load_file
 
 
 class InferencePipeline:
@@ -842,3 +839,277 @@ class InferencePipeline:
             return torch.float32
         else:
             raise NotImplementedError
+
+
+class EncoderInferencePipeline(InferencePipeline):
+    def __init__(
+        self,
+        *args,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+
+    def _compile(self):
+        torch._dynamo.config.cache_size_limit = 64
+        torch._dynamo.config.accumulated_cache_size_limit = 2048
+        torch._dynamo.config.capture_scalar_outputs = True
+        compile_mode = "max-autotune"
+        logger.info(f"Compile mode {compile_mode}")
+
+        def clone_output_wrapper(f):
+            @wraps(f)
+            def wrapped(*args, **kwargs):
+                outputs = f(*args, **kwargs)
+                return tree_map_only(
+                    torch.Tensor, lambda t: t.clone() if t.is_cuda else t, outputs
+                )
+
+            return wrapped
+
+        self.embed_condition = clone_output_wrapper(
+            torch.compile(
+                self.embed_condition,
+                mode=compile_mode,
+                fullgraph=True,  # _preprocess_input in dino is not compatible with fullgraph
+            )
+        )
+
+        self._warmup()
+
+    def _warmup(self, num_warmup_iters=3):
+        test_image = np.ones((512, 512, 4), dtype=np.uint8) * 255
+        test_image[:, :, :3] = np.random.randint(0, 255, (512, 512, 3), dtype=np.uint8)
+        image = Image.fromarray(test_image)
+        mask = None
+        image = self.merge_image_and_mask(image, mask)
+
+        for _ in tqdm(range(num_warmup_iters)):
+            ss_input_dict = self.preprocess_image(image, self.ss_preprocessor)
+            slat_input_dict = self.preprocess_image(image, self.slat_preprocessor)
+            ss_return_dict = self.sample_sparse_structure(ss_input_dict)
+
+    def instantiate_and_load_from_pretrained(
+        self,
+        config,
+        ckpt_path,
+        state_dict_fn=None,
+        state_dict_key="state_dict",
+        device="cuda",
+    ):
+        model = instantiate(config)
+
+        if ckpt_path.endswith(".safetensors"):
+            state_dict = load_file(ckpt_path, device="cuda")
+            if state_dict_fn is not None:
+                state_dict = state_dict_fn(state_dict)
+            model.load_state_dict(state_dict, strict=False)
+            model.eval()
+        else:
+            model = load_model_from_checkpoint(
+                model,
+                ckpt_path,
+                strict=True,
+                device="cpu",
+                freeze=True,
+                eval=True,
+                state_dict_key=state_dict_key,
+                state_dict_fn=state_dict_fn,
+            )
+        model = model.to(device)
+
+        return model
+
+    def init_pose_decoder(self, ss_generator_config_path, pose_decoder_name):
+        return None
+
+    def init_ss_preprocessor(self, ss_preprocessor, ss_generator_config_path):
+        if ss_preprocessor is not None:
+            return ss_preprocessor
+        config = OmegaConf.load(
+            os.path.join(self.workspace_dir, ss_generator_config_path)
+        )["tdfy"]["val_preprocessor"]
+        return instantiate(config)
+
+    def init_ss_generator(self, ss_generator_config_path, ss_generator_ckpt_path):
+        return None
+
+    def init_slat_generator(self, slat_generator_config_path, slat_generator_ckpt_path):
+        return None
+
+    def init_ss_encoder(self, ss_encoder_config_path, ss_encoder_ckpt_path):
+        return None
+
+    def init_ss_decoder(self, ss_decoder_config_path, ss_decoder_ckpt_path):
+        return None
+
+    def init_slat_decoder_gs(
+        self, slat_decoder_gs_config_path, slat_decoder_gs_ckpt_path
+    ):
+        return None
+
+    def init_slat_decoder_mesh(
+        self, slat_decoder_mesh_config_path, slat_decoder_mesh_ckpt_path
+    ):
+        return None
+
+    def override_ss_generator_cfg_config(self, *args, **kwargs):
+        return None
+
+    def override_slat_generator_cfg_config(self, *args, **kwargs):
+        return None
+
+    def init_ss_condition_embedder(
+        self, ss_generator_config_path, ss_generator_ckpt_path
+    ):
+        conf = OmegaConf.load(
+            os.path.join(self.workspace_dir, ss_generator_config_path)
+        )
+        if "condition_embedder" in conf["module"]:
+            return self.instantiate_and_load_from_pretrained(
+                conf["module"]["condition_embedder"]["backbone"],
+                os.path.join(self.workspace_dir, ss_generator_ckpt_path),
+                state_dict_fn=filter_and_remove_prefix_state_dict_fn(
+                    "_base_models.condition_embedder."
+                ),
+                device=self.device,
+            )
+        else:
+            return None
+
+    def init_slat_condition_embedder(
+        self, slat_generator_config_path, slat_generator_ckpt_path
+    ):
+        return self.init_ss_condition_embedder(
+            slat_generator_config_path, slat_generator_ckpt_path
+        )
+
+    def run(
+        self,
+        image: Union[None, Image.Image, np.ndarray],
+        mask: Union[None, Image.Image, np.ndarray] = None,
+        seed=42,
+        stage1_only=False,
+        with_mesh_postprocess=True,
+        with_texture_baking=True,
+        use_vertex_color=False,
+        stage1_inference_steps=None,
+        stage2_inference_steps=None,
+        use_stage1_distillation=False,
+        use_stage2_distillation=False,
+        decode_formats=None,
+    ) -> dict:
+        """
+        Parameters:
+        - image (Image): The input image to be processed.
+        - seed (int, optional): The random seed for reproducibility. Default is 42.
+        - stage1_only (bool, optional): If True, only the sparse structure is sampled and returned. Default is False.
+        - with_mesh_postprocess (bool, optional): If True, performs mesh post-processing. Default is True.
+        - with_texture_baking (bool, optional): If True, applies texture baking to the 3D model. Default is True.
+        Returns:
+        - dict: A dictionary containing the GLB file and additional data from the sparse structure sampling.
+        """
+        # This should only happen if called from demo
+        image = self.merge_image_and_mask(image, mask)
+        with self.device:
+            ss_input_dict = self.preprocess_image(image, self.ss_preprocessor)
+            slat_input_dict = self.preprocess_image(image, self.slat_preprocessor)
+            torch.manual_seed(seed)
+            ss_return_dict = self.sample_sparse_structure(
+                ss_input_dict,
+                inference_steps=stage1_inference_steps,
+                use_distillation=use_stage1_distillation,
+            )
+
+            ss_return_dict.update(self.pose_decoder(ss_return_dict))
+
+            if "scale" in ss_return_dict:
+                logger.info(f"Rescaling scale by {ss_return_dict['downsample_factor']}")
+                ss_return_dict["scale"] = (
+                    ss_return_dict["scale"] * ss_return_dict["downsample_factor"]
+                )
+            if stage1_only:
+                logger.info("Finished!")
+                ss_return_dict["voxel"] = ss_return_dict["coords"][:, 1:] / 64 - 0.5
+                return ss_return_dict
+
+            coords = ss_return_dict["coords"]
+            slat = self.sample_slat(
+                slat_input_dict,
+                coords,
+                inference_steps=stage2_inference_steps,
+                use_distillation=use_stage2_distillation,
+            )
+            outputs = self.decode_slat(
+                slat, self.decode_formats if decode_formats is None else decode_formats
+            )
+            outputs = self.postprocess_slat_output(
+                outputs, with_mesh_postprocess, with_texture_baking, use_vertex_color
+            )
+            logger.info("Finished!")
+
+            return {
+                **ss_return_dict,
+                **outputs,
+            }
+
+    def merge_image_and_mask(
+        self,
+        image: Union[np.ndarray, Image.Image],
+        mask: Union[None, np.ndarray, Image.Image],
+    ):
+        if mask is not None:
+            if isinstance(image, Image.Image):
+                image = np.array(image)
+
+            mask = np.array(mask)
+            if mask.ndim == 2:
+                mask = mask[..., None]
+
+            logger.info(f"Replacing alpha channel with the provided mask")
+            assert mask.shape[:2] == image.shape[:2]
+            image = np.concatenate([image[..., :3], mask], axis=-1)
+
+        image = np.array(image)
+        return image
+
+    def embed_condition(self, condition_embedder, *args, **kwargs):
+        if condition_embedder is not None:
+            tokens = condition_embedder(*args, **kwargs)
+            return tokens, None, None
+        return None, args, kwargs
+
+    def get_condition_input(self, condition_embedder, input_dict, input_mapping):
+        condition_args = self.map_input_keys(input_dict, input_mapping)
+        condition_kwargs = {
+            k: v for k, v in input_dict.items() if k not in input_mapping
+        }
+        logger.info("Running condition embedder ...")
+        embedded_cond, condition_args, condition_kwargs = self.embed_condition(
+            condition_embedder, *condition_args, **condition_kwargs
+        )
+        logger.info("Condition embedder finishes!")
+        if embedded_cond is not None:
+            condition_args = (embedded_cond,)
+            condition_kwargs = {}
+
+        return condition_args, condition_kwargs
+
+    def sample_sparse_structure(
+        self, ss_input_dict: dict, inference_steps=None, use_distillation=False
+    ):
+
+        image = ss_input_dict["image"]
+        bs = image.shape[0]
+
+        with torch.no_grad():
+            with torch.autocast(device_type="cuda", dtype=self.shape_model_dtype):
+                condition_args, condition_kwargs = self.get_condition_input(
+                    self.condition_embedders["ss_condition_embedder"],
+                    ss_input_dict,
+                    self.ss_condition_input_mapping,
+                )
+
+        return {
+            "condition_args": condition_args,
+            "condition_kwargs": condition_kwargs,
+        }
