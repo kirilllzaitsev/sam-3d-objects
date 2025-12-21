@@ -114,6 +114,21 @@ def filter_and_remove_prefix_state_dict_fn(prefix: str):
     return state_dict_fn
 
 
+def cp_rgb_weights(prev_fn=None):
+
+    def state_dict_fn(state_dict):
+        if prev_fn is not None:
+            state_dict = prev_fn(state_dict)
+        for key, value in list(state_dict.items()):
+            for pref in ["module_list", "projection_nets"]:
+                if key.startswith(f"{pref}.0"):
+                    new_key = f"{pref}.3" + key[len(f"{pref}.0") :]
+                    state_dict[new_key] = value.clone()
+        return state_dict
+
+    return state_dict_fn
+
+
 def get_last_checkpoint(path: str):
     checkpoints = glob(os.path.join(path, "epoch=*-step=*.ckpt"))
     prog = re.compile(r"epoch=(\d+)-step=(\d+).ckpt")

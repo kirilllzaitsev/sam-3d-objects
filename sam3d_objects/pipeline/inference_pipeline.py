@@ -35,6 +35,7 @@ from sam3d_objects.model.backbone.tdfy_dit.modules import sparse as sp
 from sam3d_objects.model.backbone.tdfy_dit.utils import postprocessing_utils
 from sam3d_objects.model.io import (
     filter_and_remove_prefix_state_dict_fn,
+    cp_rgb_weights,
     load_model_from_checkpoint,
 )
 from sam3d_objects.pipeline import preprocess_utils
@@ -970,9 +971,9 @@ class EncoderInferencePipeline(InferencePipeline):
             return self.instantiate_and_load_from_pretrained(
                 conf["module"]["condition_embedder"]["backbone"],
                 os.path.join(self.workspace_dir, ss_generator_ckpt_path),
-                state_dict_fn=filter_and_remove_prefix_state_dict_fn(
+                state_dict_fn=cp_rgb_weights(filter_and_remove_prefix_state_dict_fn(
                     "_base_models.condition_embedder."
-                ),
+                )),
                 device=self.device,
             )
         else:
