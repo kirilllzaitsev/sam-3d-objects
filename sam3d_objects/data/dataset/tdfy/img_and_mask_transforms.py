@@ -1,23 +1,19 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-from collections import namedtuple
 import random
-from typing import Optional, Dict
+from collections import namedtuple
+from typing import Dict, Optional
 
-import numpy as np
 import matplotlib.pyplot as plt
-import torchvision.transforms.functional
-from sam3d_objects.data.dataset.tdfy.img_processing import pad_to_square_centered
-from sam3d_objects.model.backbone.dit.embedder.point_remapper import PointRemapper
-from typing import Optional, Dict
-from loguru import logger
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torchvision
 import torchvision.transforms as tv_transforms
 import torchvision.transforms.functional
 import torchvision.transforms.functional as TF
-
+from loguru import logger
 from sam3d_objects.data.dataset.tdfy.img_processing import pad_to_square_centered
+from sam3d_objects.model.backbone.dit.embedder.point_remapper import PointRemapper
 
 
 def UNNORMALIZE(mean, std):
@@ -249,13 +245,15 @@ def crop_around_mask_with_random_box_size_factor(
     mask: torch.Tensor,
     random_box_size_factor: float = 1.0,
     pointmap: Optional[torch.Tensor] = None,
-) -> np.ndarray:
+    event_image: Optional[torch.Tensor] = None,
+) -> list:
     return crop_around_mask_with_padding(
         loaded_image,
         mask,
         box_size_factor=1.0 + random.uniform(0, 1) * random_box_size_factor,
         padding_factor=0.0,
         pointmap=pointmap,
+        event_image=event_image,
     )
 
 
@@ -265,7 +263,8 @@ def crop_around_mask_with_padding(
     box_size_factor: float = 1.6,
     padding_factor: float = 0.1,
     pointmap: Optional[torch.Tensor] = None,
-) -> np.ndarray:
+    event_image: Optional[torch.Tensor] = None,
+) -> list:
     # cast to ensure the function can be called normally
     cast_mask = False
     if mask.dim() == 3:
@@ -324,12 +323,38 @@ def crop_around_mask_with_padding(
             )
 
     rgb_image, mask = split_rgba(loaded_image)
+
+    if event_image is not None:
+        event_image2 = concat_rgba(event_image, mask)
+
+        event_image2 = torchvision.transforms.functional.crop(
+            event_image2, bbox[1], bbox[0], bbox[3] - bbox[1], bbox[2] - bbox[0]
+        )
+
+        event_image2 = torch.nn.functional.pad(
+            event_image2,
+            (pad_w, pad_w_extra, pad_h, pad_h_extra),
+            mode="constant",
+            value=0,
+        )
+        if padding_factor > 0:
+            event_image2 = torch.nn.functional.pad(
+                event_image2,
+                (extend_size, extend_size, extend_size, extend_size),
+                mode="constant",
+                value=0,
+            )
+        event_image, _ = split_rgba(event_image2)
+
     if cast_mask:
         mask = mask[None]
 
+    res = [rgb_image, mask]
     if pointmap is not None:
-        return rgb_image, mask, pointmap
-    return rgb_image, mask
+        res.append(pointmap)
+    if event_image is not None:
+        res.append(event_image)
+    return res
 
 
 def compute_mask_bbox(
@@ -432,20 +457,21 @@ def resize_all_to_same_size(
     rgb_image: torch.Tensor,
     mask: torch.Tensor,
     pointmap: Optional[torch.Tensor] = None,
+    event_image: Optional[torch.Tensor] = None,
     target_size: Optional[tuple[int, int]] = None,
-) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+) -> list:
     """
     Resize RGB image, mask, and pointmap to the same size.
-    
+
     This is crucial when pointmaps have different resolution than RGB images,
     which must be done BEFORE any cropping operations.
-    
+
     Args:
         rgb_image: RGB image tensor of shape (C, H, W)
         mask: Mask tensor of shape (H, W) or (1, H, W)
         pointmap: Optional pointmap tensor of shape (C_p, H_p, W_p)
         target_size: Target size as (H, W). If None, uses RGB image size.
-        
+
     Returns:
         Tuple of (resized_rgb, resized_mask, resized_pointmap)
     """
@@ -459,8 +485,16 @@ def resize_all_to_same_size(
     rgb_needs_resize = (rgb_image.shape[1], rgb_image.shape[2]) != target_size
     if rgb_needs_resize:
         rgb_image = torchvision.transforms.functional.resize(
-            rgb_image, target_size, interpolation=torchvision.transforms.InterpolationMode.BILINEAR
+            rgb_image,
+            target_size,
+            interpolation=torchvision.transforms.InterpolationMode.BILINEAR,
         )
+        if event_image is not None:
+            event_image = torchvision.transforms.functional.resize(
+                event_image,
+                target_size,
+                interpolation=torchvision.transforms.InterpolationMode.BILINEAR,
+            )
         mask = torchvision.transforms.functional.resize(
             mask, target_size, interpolation=torchvision.transforms.InterpolationMode.NEAREST
         )
@@ -491,10 +525,13 @@ def resize_all_to_same_size(
     
     if squeeze_mask:
         mask = mask.squeeze(0)
-    
+
+    res = [rgb_image, mask]
     if pointmap is not None:
-        return rgb_image, mask, pointmap
-    return rgb_image, mask
+        res.append(pointmap)
+    if event_image is not None:
+        res.append(event_image)
+    return res
 
 
 SSINormalizedPointmap = namedtuple("SSINormalizedPointmap", ["pointmap", "scale", "shift"])
