@@ -272,6 +272,8 @@ def crop_around_mask_with_padding(
         mask = mask[0]
         cast_mask = True
     loaded_image = concat_rgba(loaded_image, mask)
+    if event_image is not None:
+        event_image2 = concat_rgba(event_image, mask)
 
     bbox = compute_mask_bbox(mask, box_size_factor)
     loaded_image = torchvision.transforms.functional.crop(
@@ -325,8 +327,6 @@ def crop_around_mask_with_padding(
     rgb_image, mask = split_rgba(loaded_image)
 
     if event_image is not None:
-        event_image2 = concat_rgba(event_image, mask)
-
         event_image2 = torchvision.transforms.functional.crop(
             event_image2, bbox[1], bbox[0], bbox[3] - bbox[1], bbox[2] - bbox[0]
         )
