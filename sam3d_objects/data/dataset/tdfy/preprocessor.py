@@ -73,7 +73,7 @@ class PreProcessor:
         return pointmap_normalizer.normalize(pointmap, mask)
 
     def _process_image_mask_pointmap_mess(
-        self, rgb_image, rgb_image_mask, pointmap=None
+        self, rgb_image, rgb_image_mask, pointmap=None, event_image=None
     ):
         """Extended version that handles pointmaps"""
  
@@ -82,18 +82,22 @@ class PreProcessor:
             pointmap, rgb_image_mask, self.pointmap_normalizer
         )
 
-        # Apply transforms to the original full rgb image and mask.
+        # Apply transforms to the original full rgb image and mask. (not used according to yaml)
         rgb_image, rgb_image_mask = self._preprocess_rgb_image_mask(rgb_image, rgb_image_mask)
 
         # These two are typically used for getting cropped images of the object
         #   : first apply joint transforms
-        processed_rgb_image, processed_mask, processed_pointmap = (
-            self._preprocess_image_mask_pointmap(rgb_image, rgb_image_mask, pointmap_for_crop)
+        processed_rgb_image, processed_mask, processed_pointmap, processed_event_image = (
+            self._preprocess_image_mask_pointmap(rgb_image, rgb_image_mask, pointmap_for_crop, event_image=event_image)
         )
         #   : then apply individual transforms on top of the joint transforms
         processed_rgb_image = self._apply_transform(
             processed_rgb_image, self.img_transform
         )
+        if processed_event_image is not None:
+            processed_event_image = self._apply_transform(
+                processed_event_image, self.img_transform
+            )
         processed_mask = self._apply_transform(processed_mask, self.mask_transform)
         if processed_pointmap is not None:
             processed_pointmap = self._apply_transform(
@@ -127,6 +131,15 @@ class PreProcessor:
                     "rgb_pointmap": rgb_pointmap,
                 }
             )
+        if processed_event_image is not None:
+            event_image = self._apply_transform(event_image, self.img_transform)
+            processed_event_image = self._apply_transform(processed_event_image, self.img_transform)
+            result.update(
+                {
+                    "event_image": processed_event_image,
+                    "rgb_event_image": event_image,
+                }
+            )
             
         # Add normalization parameters if normalization was applied
         if pointmap_scale is not None and pointmap_shift is not None:
@@ -155,7 +168,7 @@ class PreProcessor:
                 rgb_image, rgb_image_mask = trans(rgb_image, rgb_image_mask)
         return rgb_image, rgb_image_mask
 
-    def _preprocess_image_mask_pointmap(self, rgb_image, mask_image, pointmap=None):
+    def _preprocess_image_mask_pointmap(self, rgb_image, mask_image, pointmap=None, event_image=None):
         """Apply joint transforms with priority: triple transforms > dual transforms."""
         # Priority: img_mask_pointmap_joint_transform when pointmap is provided
         if (
@@ -164,10 +177,10 @@ class PreProcessor:
             and pointmap is not None
         ):
             for trans in self.img_mask_pointmap_joint_transform:
-                rgb_image, mask_image, pointmap = trans(
-                    rgb_image, mask_image, pointmap=pointmap
+                rgb_image, mask_image, pointmap, event_image = trans(
+                    rgb_image, mask_image, pointmap=pointmap, event_image=event_image
                 )
-            return rgb_image, mask_image, pointmap
+            return rgb_image, mask_image, pointmap, event_image
 
         # Fallback: img_mask_joint_transform (existing behavior)
         elif (
@@ -178,12 +191,12 @@ class PreProcessor:
                 rgb_image, mask_image = trans(rgb_image, mask_image)
             return rgb_image, mask_image, pointmap
 
-        return rgb_image, mask_image, pointmap
+        return rgb_image, mask_image, pointmap, event_image
 
     def _preprocess_image_and_mask(self, rgb_image, mask_image):
         """Backward compatibility wrapper - only applies dual transforms"""
-        rgb_image, mask_image, _ = self._preprocess_image_mask_pointmap(
-            rgb_image, mask_image, None
+        rgb_image, mask_image, _, event_image = self._preprocess_image_mask_pointmap(
+            rgb_image, mask_image, None, None
         )
         return rgb_image, mask_image
 
