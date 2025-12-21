@@ -2,7 +2,7 @@
 import os
 
 # not ideal to put that here
-os.environ["CUDA_HOME"] = os.environ["CONDA_PREFIX"]
+# os.environ["CUDA_HOME"] = os.environ["CONDA_PREFIX"]
 os.environ["LIDRA_SKIP_INIT"] = "true"
 
 import sys
@@ -82,12 +82,13 @@ BLACKLIST_FILTERS = [
 class Inference:
     # public facing inference API
     # only put publicly exposed arguments here
-    def __init__(self, config_file: str, compile: bool = False):
+    def __init__(self, config_file: str, compile: bool = False, device='cuda'):
         # load inference pipeline
         config = OmegaConf.load(config_file)
         config.rendering_engine = "pytorch3d"  # overwrite to disable nvdiffrast
         config.compile_model = compile
         config.workspace_dir = os.path.dirname(config_file)
+        config.device=device
         check_hydra_safety(config, WHITELIST_FILTERS, BLACKLIST_FILTERS)
         self._pipeline: InferencePipelinePointMap = instantiate(config)
 
@@ -117,6 +118,7 @@ class Inference:
             use_vertex_color=True,
             stage1_inference_steps=None,
             pointmap=pointmap,
+            decode_formats=['gaussian']
         )
 
 
