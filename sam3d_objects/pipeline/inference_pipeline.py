@@ -981,9 +981,7 @@ class EncoderInferencePipeline(InferencePipeline):
     def init_slat_condition_embedder(
         self, slat_generator_config_path, slat_generator_ckpt_path
     ):
-        return self.init_ss_condition_embedder(
-            slat_generator_config_path, slat_generator_ckpt_path
-        )
+        return None
 
     def run(
         self,
