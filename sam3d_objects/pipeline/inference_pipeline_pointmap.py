@@ -330,6 +330,7 @@ class InferencePipelinePointMap(InferencePipeline):
         use_stage1_distillation=False,
         use_stage2_distillation=False,
         pointmap=None,
+        event_image=None,
         decode_formats=None,
         estimate_plane=False,
     ) -> dict:
@@ -541,6 +542,7 @@ class EncoderInferencePipelinePointMap(EncoderInferencePipeline):
         image = Image.fromarray(test_image)
         mask = None
         image = self.merge_image_and_mask(image, mask)
+        event_image = np.zeros_like(image)
         with torch.inference_mode(False):
             with torch.no_grad():
                 for _ in tqdm(range(num_warmup_iters)):
@@ -548,7 +550,7 @@ class EncoderInferencePipelinePointMap(EncoderInferencePipeline):
                     pointmap = pointmap_dict["pointmap"]
 
                     ss_input_dict = self.preprocess_image(
-                        image, self.ss_preprocessor, pointmap=pointmap
+                        image, self.ss_preprocessor, pointmap=pointmap, event_image=event_image
                     )
                     ss_return_dict = self.sample_sparse_structure(
                         ss_input_dict, inference_steps=None
@@ -668,6 +670,7 @@ class EncoderInferencePipelinePointMap(EncoderInferencePipeline):
         image: Union[Image.Image, np.ndarray],
         preprocessor: PreProcessor,
         pointmap=None,
+        event_image=None,
     ) -> torch.Tensor:
         # canonical type is numpy
         if not isinstance(image, np.ndarray):
@@ -683,29 +686,12 @@ class EncoderInferencePipelinePointMap(EncoderInferencePipeline):
         rgb_image_mask = get_mask(rgba_image, None, "ALPHA_CHANNEL")
 
         preprocessor_return_dict = preprocessor._process_image_mask_pointmap_mess(
-            rgb_image, rgb_image_mask, pointmap
+            rgb_image, rgb_image_mask, pointmap, event_image=event_image
         )
 
         # Put in a for loop?
         _item = preprocessor_return_dict
-        item = {
-            "mask": _item["mask"][None].to(self.device),
-            "image": _item["image"][None].to(self.device),
-            "rgb_image": _item["rgb_image"][None].to(self.device),
-            "rgb_image_mask": _item["rgb_image_mask"][None].to(self.device),
-        }
-
-        if pointmap is not None and preprocessor.pointmap_transform != (None,):
-            item["pointmap"] = _item["pointmap"][None].to(self.device)
-            item["rgb_pointmap"] = _item["rgb_pointmap"][None].to(self.device)
-            item["pointmap_scale"] = _item["pointmap_scale"][None].to(self.device)
-            item["pointmap_shift"] = _item["pointmap_shift"][None].to(self.device)
-            item["rgb_pointmap_scale"] = _item["rgb_pointmap_scale"][None].to(
-                self.device
-            )
-            item["rgb_pointmap_shift"] = _item["rgb_pointmap_shift"][None].to(
-                self.device
-            )
+        item = {k: v[None].to(self.device) for k, v in _item.items() if v is not None}
 
         return item
 
@@ -724,6 +710,7 @@ class EncoderInferencePipelinePointMap(EncoderInferencePipeline):
         use_stage1_distillation=False,
         use_stage2_distillation=False,
         pointmap=None,
+        event_image=None,
         decode_formats=None,
         estimate_plane=False,
     ) -> dict:
@@ -738,7 +725,7 @@ class EncoderInferencePipelinePointMap(EncoderInferencePipeline):
             #     return self.estimate_plane(pointmap_dict, image)
 
             ss_input_dict = self.preprocess_image(
-                image, self.ss_preprocessor, pointmap=pointmap
+                image, self.ss_preprocessor, pointmap=pointmap, event_image=event_image
             )
 
             if seed is not None:
