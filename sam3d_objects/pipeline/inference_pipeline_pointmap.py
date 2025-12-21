@@ -1,26 +1,28 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-from typing import Union, Optional
 from copy import deepcopy
+from typing import Optional, Union
+
 import numpy as np
 import torch
-from tqdm import tqdm
 import torchvision
 from loguru import logger
 from PIL import Image
-
 from pytorch3d.renderer import look_at_view_transform
 from pytorch3d.transforms import Transform3d
-
+from sam3d_objects.data.dataset.tdfy.img_and_mask_transforms import get_mask
+from sam3d_objects.data.dataset.tdfy.preprocessor import PreProcessor
+from sam3d_objects.data.dataset.tdfy.transforms_3d import DecomposedTransform
 from sam3d_objects.model.backbone.dit.embedder.pointmap import PointPatchEmbed
-from sam3d_objects.pipeline.inference_pipeline import InferencePipeline
-from sam3d_objects.data.dataset.tdfy.img_and_mask_transforms import (
-    get_mask,
+from sam3d_objects.pipeline.inference_pipeline import (
+    EncoderInferencePipeline,
+    InferencePipeline,
 )
-from sam3d_objects.data.dataset.tdfy.transforms_3d import (
-    DecomposedTransform,
+from sam3d_objects.pipeline.inference_utils import (
+    estimate_plane_area,
+    o3d_plane_estimation,
 )
 from sam3d_objects.pipeline.utils.pointmap import infer_intrinsics_from_pointmap
-from sam3d_objects.pipeline.inference_utils import o3d_plane_estimation, estimate_plane_area
+from tqdm import tqdm
 
 
 def camera_to_pytorch3d_camera(device="cpu") -> DecomposedTransform:
@@ -172,7 +174,7 @@ class InferencePipelinePointMap(InferencePipeline):
     def preprocess_image(
         self,
         image: Union[Image.Image, np.ndarray],
-        preprocessor,
+        preprocessor: PreProcessor,
         pointmap=None,
     ) -> torch.Tensor:
         # canonical type is numpy
@@ -491,3 +493,267 @@ class InferencePipelinePointMap(InferencePipeline):
             "scale": torch.tensor([[1.0, 1.0, 1.0]]),
             "rotation": torch.tensor([[1.0, 0.0, 0.0, 0.0]]),
         }
+
+
+class EncoderInferencePipelinePointMap(EncoderInferencePipeline):
+
+    def __init__(
+        self,
+        *args,
+        depth_model,
+        layout_post_optimization_method=None,
+        clip_pointmap_beyond_scale=None,
+        **kwargs,
+    ):
+        self.depth_model = depth_model
+        self.layout_post_optimization_method = layout_post_optimization_method
+        self.clip_pointmap_beyond_scale = clip_pointmap_beyond_scale
+        super().__init__(*args, **kwargs)
+
+    def _compile(self):
+        torch._dynamo.config.cache_size_limit = 64
+        torch._dynamo.config.accumulated_cache_size_limit = 2048
+        torch._dynamo.config.capture_scalar_outputs = True
+        compile_mode = "max-autotune"
+
+        for embedder, _ in self.condition_embedders[
+            "ss_condition_embedder"
+        ].embedder_list:
+            if isinstance(embedder, PointPatchEmbed):
+                logger.info("Found PointPatchEmbed")
+                embedder.inner_forward = compile_wrapper(
+                    embedder.inner_forward,
+                    mode=compile_mode,
+                    fullgraph=True,
+                )
+            else:
+                embedder.forward = compile_wrapper(
+                    embedder.forward,
+                    mode=compile_mode,
+                    fullgraph=True,
+                )
+
+        self._warmup()
+
+    def _warmup(self, num_warmup_iters=3):
+        test_image = np.ones((512, 512, 4), dtype=np.uint8) * 255
+        test_image[:, :, :3] = np.random.randint(0, 255, (512, 512, 3), dtype=np.uint8)
+        image = Image.fromarray(test_image)
+        mask = None
+        image = self.merge_image_and_mask(image, mask)
+        with torch.inference_mode(False):
+            with torch.no_grad():
+                for _ in tqdm(range(num_warmup_iters)):
+                    pointmap_dict = recursive_clone(self.compute_pointmap(image))
+                    pointmap = pointmap_dict["pointmap"]
+
+                    ss_input_dict = self.preprocess_image(
+                        image, self.ss_preprocessor, pointmap=pointmap
+                    )
+                    ss_return_dict = self.sample_sparse_structure(
+                        ss_input_dict, inference_steps=None
+                    )
+
+    def _clip_pointmap(
+        self, pointmap: torch.Tensor, mask: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.clip_pointmap_beyond_scale is None:
+            return pointmap
+
+        pointmap_size = (pointmap.shape[1], pointmap.shape[2])
+        if mask.dim() == 2:
+            mask = mask.unsqueeze(0)
+        mask_resized = torchvision.transforms.functional.resize(
+            mask,
+            pointmap_size,
+            interpolation=torchvision.transforms.InterpolationMode.NEAREST,
+        ).squeeze(0)
+
+        pointmap_flat = pointmap.reshape(3, -1)
+        # Get valid points from the mask
+        mask_bool = mask_resized.reshape(-1) > 0.5
+        mask_points = pointmap_flat[:, mask_bool]
+        mask_distance = mask_points.nanmedian(dim=-1).values[-1]
+        logger.info(f"mask_distance: {mask_distance}")
+        pointmap_clipped_flat = torch.where(
+            pointmap_flat[2, ...].abs()
+            > self.clip_pointmap_beyond_scale * mask_distance,
+            torch.full_like(pointmap_flat, float("nan")),
+            pointmap_flat,
+        )
+        pointmap_clipped = pointmap_clipped_flat.reshape(pointmap.shape)
+        return pointmap_clipped
+
+    def compute_pointmap(self, image, pointmap=None):
+        loaded_image = self.image_to_float(image)
+        loaded_image = torch.from_numpy(loaded_image)
+        loaded_mask = loaded_image[..., -1]
+        loaded_image = loaded_image.permute(2, 0, 1).contiguous()[:3]
+
+        if pointmap is None:
+            with torch.no_grad():
+                with torch.autocast(device_type="cuda", dtype=self.dtype):
+                    output = self.depth_model(loaded_image)
+            pointmaps = output["pointmaps"]
+            camera_convention_transform = (
+                Transform3d()
+                .rotate(camera_to_pytorch3d_camera(device=self.device).rotation)
+                .to(self.device)
+            )
+            points_tensor = camera_convention_transform.transform_points(pointmaps)
+            intrinsics = output.get("intrinsics", None)
+        else:
+            output = {}
+            points_tensor = pointmap.to(self.device)
+            if loaded_image.shape != points_tensor.shape:
+                # Interpolate points_tensor to match loaded_image size
+                # loaded_image has shape [3, H, W], we need H and W
+                points_tensor = (
+                    torch.nn.functional.interpolate(
+                        points_tensor.permute(2, 0, 1).unsqueeze(0),
+                        size=(loaded_image.shape[1], loaded_image.shape[2]),
+                        mode="nearest",
+                    )
+                    .squeeze(0)
+                    .permute(1, 2, 0)
+                )
+            intrinsics = None
+
+        points_tensor = points_tensor.permute(2, 0, 1)
+        points_tensor = self._clip_pointmap(points_tensor, loaded_mask)
+
+        # Prepare the point map tensor
+        point_map_tensor = {
+            "pointmap": points_tensor,
+            "pts_color": loaded_image,
+        }
+
+        # If depth model doesn't provide intrinsics, infer them
+        if intrinsics is None:
+            intrinsics_result = infer_intrinsics_from_pointmap(
+                points_tensor.permute(1, 2, 0), device=self.device
+            )
+            point_map_tensor["intrinsics"] = intrinsics_result["intrinsics"]
+
+        return point_map_tensor
+
+    @staticmethod
+    def _down_sample_img(img_3chw: torch.Tensor):
+        # img_3chw: (3, H, W)
+        x = img_3chw.unsqueeze(0)
+        if x.dtype == torch.uint8:
+            x = x.float() / 255.0
+        max_side = max(x.shape[2], x.shape[3])
+        scale_factor = 1.0
+
+        # heuristics
+        if max_side > 3800:
+            scale_factor = 0.125
+        if max_side > 1900:
+            scale_factor = 0.25
+        elif max_side > 1200:
+            scale_factor = 0.5
+
+        x = torch.nn.functional.interpolate(
+            x,
+            scale_factor=(scale_factor, scale_factor),
+            mode="bilinear",
+            align_corners=False,
+            antialias=True,
+        )  # -> (1, 3, H/4, W/4)
+        return x.squeeze(0)
+
+    def preprocess_image(
+        self,
+        image: Union[Image.Image, np.ndarray],
+        preprocessor: PreProcessor,
+        pointmap=None,
+    ) -> torch.Tensor:
+        # canonical type is numpy
+        if not isinstance(image, np.ndarray):
+            image = np.array(image)
+
+        assert image.ndim == 3  # no batch dimension as of now
+        assert image.shape[-1] == 4  # rgba format
+        assert image.dtype == np.uint8  # [0,255] range
+
+        rgba_image = torch.from_numpy(self.image_to_float(image))
+        rgba_image = rgba_image.permute(2, 0, 1).contiguous()
+        rgb_image = rgba_image[:3]
+        rgb_image_mask = get_mask(rgba_image, None, "ALPHA_CHANNEL")
+
+        preprocessor_return_dict = preprocessor._process_image_mask_pointmap_mess(
+            rgb_image, rgb_image_mask, pointmap
+        )
+
+        # Put in a for loop?
+        _item = preprocessor_return_dict
+        item = {
+            "mask": _item["mask"][None].to(self.device),
+            "image": _item["image"][None].to(self.device),
+            "rgb_image": _item["rgb_image"][None].to(self.device),
+            "rgb_image_mask": _item["rgb_image_mask"][None].to(self.device),
+        }
+
+        if pointmap is not None and preprocessor.pointmap_transform != (None,):
+            item["pointmap"] = _item["pointmap"][None].to(self.device)
+            item["rgb_pointmap"] = _item["rgb_pointmap"][None].to(self.device)
+            item["pointmap_scale"] = _item["pointmap_scale"][None].to(self.device)
+            item["pointmap_shift"] = _item["pointmap_shift"][None].to(self.device)
+            item["rgb_pointmap_scale"] = _item["rgb_pointmap_scale"][None].to(
+                self.device
+            )
+            item["rgb_pointmap_shift"] = _item["rgb_pointmap_shift"][None].to(
+                self.device
+            )
+
+        return item
+
+    def run(
+        self,
+        image: Union[None, Image.Image, np.ndarray],
+        mask: Union[None, Image.Image, np.ndarray] = None,
+        seed: Optional[int] = None,
+        stage1_only=False,
+        with_mesh_postprocess=True,
+        with_texture_baking=True,
+        with_layout_postprocess=True,
+        use_vertex_color=False,
+        stage1_inference_steps=None,
+        stage2_inference_steps=None,
+        use_stage1_distillation=False,
+        use_stage2_distillation=False,
+        pointmap=None,
+        decode_formats=None,
+        estimate_plane=False,
+    ) -> dict:
+        image = self.merge_image_and_mask(image, mask)
+        with self.device:
+            pointmap_dict = self.compute_pointmap(image, pointmap)
+            pointmap = pointmap_dict["pointmap"]
+            pts = type(self)._down_sample_img(pointmap)
+            pts_colors = type(self)._down_sample_img(pointmap_dict["pts_color"])
+
+            # if estimate_plane:
+            #     return self.estimate_plane(pointmap_dict, image)
+
+            ss_input_dict = self.preprocess_image(
+                image, self.ss_preprocessor, pointmap=pointmap
+            )
+
+            if seed is not None:
+                torch.manual_seed(seed)
+            ss_return_dict = self.sample_sparse_structure(
+                ss_input_dict,
+                inference_steps=stage1_inference_steps,
+                use_distillation=use_stage1_distillation,
+            )
+
+            # glb.export("sample.glb")
+            logger.info("Finished!")
+
+            return {
+                **ss_return_dict,
+                "pointmap": pts.cpu().permute((1, 2, 0)),  # HxWx3
+                "pointmap_colors": pts_colors.cpu().permute((1, 2, 0)),  # HxWx3
+            }
