@@ -119,8 +119,8 @@ class Inference:
             use_vertex_color=True,
             stage1_inference_steps=None,
             pointmap=pointmap,
+            decode_formats=['gaussian'],
             event_image=event_image,
-            decode_formats=['gaussian']
         )
 
 
