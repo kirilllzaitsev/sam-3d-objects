@@ -495,6 +495,37 @@ class InferencePipelinePointMap(InferencePipeline):
             "rotation": torch.tensor([[1.0, 0.0, 0.0, 0.0]]),
         }
 
+    def forward(
+        self, 
+        image: Union[Image.Image, np.ndarray],
+        mask: Optional[Union[None, Image.Image, np.ndarray]],
+        seed: Optional[int] = 42,
+        pointmap=None,
+        event_image=None
+    ):
+        image = self.merge_mask_to_rgba(image, mask)
+        return self.run(
+            image=image,
+            mask=None,
+            seed=seed,
+            stage1_only=False,
+            with_mesh_postprocess=False,
+            with_texture_baking=False,
+            with_layout_postprocess=True,
+            use_vertex_color=True,
+            stage1_inference_steps=None,
+            pointmap=pointmap,
+            decode_formats=['gaussian'],
+            event_image=event_image,
+        )
+
+    def merge_mask_to_rgba(self, image, mask):
+        mask = mask.astype(np.uint8) * 255
+        mask = mask[..., None]
+        # embed mask in alpha channel
+        rgba_image = np.concatenate([image[..., :3], mask], axis=-1)
+        return rgba_image
+
 
 class EncoderInferencePipelinePointMap(EncoderInferencePipeline):
 
