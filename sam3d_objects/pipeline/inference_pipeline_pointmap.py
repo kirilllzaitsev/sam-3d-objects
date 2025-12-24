@@ -95,10 +95,10 @@ class InferencePipelinePointMap(InferencePipeline):
     def __init__(
         self, *args, depth_model, layout_post_optimization_method=None, clip_pointmap_beyond_scale=None, **kwargs
     ):
+        super().__init__(*args, **kwargs)
         self.depth_model = depth_model
         self.layout_post_optimization_method = layout_post_optimization_method
         self.clip_pointmap_beyond_scale = clip_pointmap_beyond_scale
-        super().__init__(*args, **kwargs)
 
     def _compile(self):
         torch._dynamo.config.cache_size_limit = 64

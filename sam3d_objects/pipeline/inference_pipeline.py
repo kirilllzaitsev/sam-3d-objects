@@ -34,8 +34,8 @@ from sam3d_objects.data.dataset.tdfy.img_and_mask_transforms import get_mask
 from sam3d_objects.model.backbone.tdfy_dit.modules import sparse as sp
 from sam3d_objects.model.backbone.tdfy_dit.utils import postprocessing_utils
 from sam3d_objects.model.io import (
-    filter_and_remove_prefix_state_dict_fn,
     cp_rgb_weights,
+    filter_and_remove_prefix_state_dict_fn,
     load_model_from_checkpoint,
 )
 from sam3d_objects.pipeline import preprocess_utils
@@ -46,9 +46,10 @@ from sam3d_objects.pipeline.inference_utils import (
     get_pose_decoder,
     prune_sparse_structure,
 )
+from torch import nn
 
 
-class InferencePipeline:
+class InferencePipeline(nn.Module):
     def __init__(
         self,
         ss_generator_config_path,
@@ -92,6 +93,7 @@ class InferencePipeline:
         slat_mean=SLAT_MEAN,
         slat_std=SLAT_STD,
     ):
+        super().__init__()
         self.rendering_engine = rendering_engine
         self.device = torch.device(device)
         self.compile_model = compile_model
@@ -160,10 +162,10 @@ class InferencePipeline:
                 slat_generator_config_path, slat_generator_ckpt_path
             )
 
-            self.condition_embedders = {
+            self.condition_embedders = torch.nn.ModuleDict({
                 "ss_condition_embedder": ss_condition_embedder,
                 "slat_condition_embedder": slat_condition_embedder,
-            }
+            })
 
             # override generator and condition embedder setting
             self.override_ss_generator_cfg_config(
