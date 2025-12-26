@@ -726,6 +726,29 @@ class EncoderInferencePipelinePointMap(EncoderInferencePipeline):
 
         return item
 
+    def forward(
+        self, 
+        image: Union[Image.Image, np.ndarray],
+        mask: Optional[Union[None, Image.Image, np.ndarray]],
+        seed: Optional[int] = 42,
+        pointmap=None,
+        event_image=None
+    ):
+        return self.run(
+            image=image,
+            mask=mask,
+            seed=seed,
+            stage1_only=False,
+            with_mesh_postprocess=False,
+            with_texture_baking=False,
+            with_layout_postprocess=True,
+            use_vertex_color=True,
+            stage1_inference_steps=None,
+            pointmap=pointmap,
+            decode_formats=['gaussian'],
+            event_image=event_image,
+        )
+
     def run(
         self,
         image: Union[None, Image.Image, np.ndarray],
