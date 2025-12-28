@@ -7,6 +7,8 @@ from typing import Optional, Tuple, List, Literal, Dict
 from sam3d_objects.model.layers.llama3.ff import FeedForward
 from omegaconf import OmegaConf
 
+from event_sam3d.models.fusion import GatedProjectionFusion, TokenFusionTransformer
+
 class EmbedderFuser(torch.nn.Module):
     """
     Fusing individual condition embedder. Require kwargs for the forward!
@@ -31,6 +33,8 @@ class EmbedderFuser(torch.nn.Module):
         drop_modalities_weight: Dict[List[str], float] = None,
         dropout_prob: float = 0.0,
         force_drop_modalities: List[str] = None,
+        rgbe_fusion_type = "gated",
+        use_event = False,
     ):
         super().__init__()
         # torch.compile does not support OmegaConf.ListConfig, so we convert to a list
@@ -40,6 +44,8 @@ class EmbedderFuser(torch.nn.Module):
             self.embedder_list = embedder_list
         
         self.embed_dims = 0
+        self.rgbe_fusion_type = rgbe_fusion_type
+        self.use_event = use_event
         self.compression_projection_multiplier = compression_projection_multiplier
         self.concate_embed_dims = 0
         # keep moduleList to be compatible with nn module
@@ -98,6 +104,12 @@ class EmbedderFuser(torch.nn.Module):
         if freeze:
             self.requires_grad_(False)
             self.eval()
+
+        if use_event:
+            if rgbe_fusion_type=="gated":
+                self.rgbe_fuser = GatedProjectionFusion(nmods=3, dim=1024)
+            else:
+                self.rgbe_fuser = TokenFusionTransformer(dim=1024, heads=4)
 
     def _make_projection_net(
         self,
