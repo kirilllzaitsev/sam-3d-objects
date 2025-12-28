@@ -215,7 +215,8 @@ class EmbedderFuser(torch.nn.Module):
     def forward(self, *args, **kwargs):
         tokens = []
         kwarg_names = []
-        
+
+        fusion_idxs={} 
         for i, (condition_embedder, kwargs_info) in enumerate(self.embedder_list):
             # Ideally, we would batch the inputs; but that assumes same-sized inputs
             for kwarg_name, pos_group in kwargs_info:
@@ -237,6 +238,22 @@ class EmbedderFuser(torch.nn.Module):
                         )
                 tokens.append(cond_token)
                 kwarg_names.append(kwarg_name)
+                if self.use_event:
+                    if kwarg_name in ['rgb_image', 'rgb_event_image', 'event_image']:
+                        fusion_idxs[kwarg_name]=(len(tokens)-1)
+
+        if self.use_event:
+            if self.rgbe_fusion_type == "gated":
+                event_tokens = torch.cat([tokens[fusion_idxs['event_image']],tokens[fusion_idxs['rgb_event_image']]], dim=2)
+            else:
+                event_tokens = torch.cat([tokens[fusion_idxs['event_image']],tokens[fusion_idxs['rgb_event_image']]], dim=1)
+
+            tokens[fusion_idxs['rgb_image']] = self.rgbe_fuser(
+                target=tokens[fusion_idxs['rgb_image']], 
+                src=event_tokens
+            )
+            tokens = [t for i, t in enumerate(tokens) if i not in [fusion_idxs['event_image'], fusion_idxs['rgb_event_image']]]
+            kwarg_names = [k for i, k in enumerate(kwarg_names) if i not in [fusion_idxs['event_image'], fusion_idxs['rgb_event_image']]]
 
         # Apply dropout modalities with preserved order
         tokens = self._dropout_modalities(kwarg_names, tokens)
