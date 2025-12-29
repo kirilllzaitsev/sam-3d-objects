@@ -109,7 +109,7 @@ class EmbedderFuser(torch.nn.Module):
             if rgbe_fusion_type=="gated":
                 self.rgbe_fuser = GatedProjectionFusion(nmods=3, dim=1024)
             else:
-                self.rgbe_fuser = TokenFusionTransformer(dim=1024, heads=4)
+                self.rgbe_fuser = TokenFusionTransformer(dim=1024, heads=8, depth=1)
 
     def _make_projection_net(
         self,
