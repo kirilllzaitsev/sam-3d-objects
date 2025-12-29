@@ -239,18 +239,17 @@ class EmbedderFuser(torch.nn.Module):
                 tokens.append(cond_token)
                 kwarg_names.append(kwarg_name)
                 if self.use_event:
-                    if kwarg_name in ['rgb_image', 'rgb_event_image', 'event_image']:
+                    if kwarg_name in ['image', 'rgb_image', 'rgb_event_image', 'event_image']:
                         fusion_idxs[kwarg_name]=(len(tokens)-1)
 
         if self.use_event:
-            if self.rgbe_fusion_type == "gated":
-                event_tokens = torch.cat([tokens[fusion_idxs['event_image']],tokens[fusion_idxs['rgb_event_image']]], dim=2)
-            else:
-                event_tokens = torch.cat([tokens[fusion_idxs['event_image']],tokens[fusion_idxs['rgb_event_image']]], dim=1)
-
             tokens[fusion_idxs['rgb_image']] = self.rgbe_fuser(
                 target=tokens[fusion_idxs['rgb_image']], 
-                src=event_tokens
+                src=tokens[fusion_idxs['rgb_event_image']]
+            )
+            tokens[fusion_idxs['image']] = self.rgbe_fuser(
+                target=tokens[fusion_idxs['image']], 
+                src=tokens[fusion_idxs['event_image']]
             )
             tokens = [t for i, t in enumerate(tokens) if i not in [fusion_idxs['event_image'], fusion_idxs['rgb_event_image']]]
             kwarg_names = [k for i, k in enumerate(kwarg_names) if i not in [fusion_idxs['event_image'], fusion_idxs['rgb_event_image']]]
