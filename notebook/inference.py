@@ -82,13 +82,30 @@ BLACKLIST_FILTERS = [
 class Inference:
     # public facing inference API
     # only put publicly exposed arguments here
-    def __init__(self, config_file: str, compile: bool = False, device='cuda'):
+    def __init__(
+        self,
+        config_file: str,
+        compile: bool = False,
+        use_event=False,
+        use_ckpt=True,
+        rgbe_fusion_type="gated",
+        device="cuda",
+        ss_generator_cond_embedder_ckpt_path=None,
+        slat_generator_cond_embedder_ckpt_path=None,
+        rgbe_fuser_ckpt_path=None,
+    ):
         # load inference pipeline
         config = OmegaConf.load(config_file)
         config.rendering_engine = "pytorch3d"  # overwrite to disable nvdiffrast
         config.compile_model = compile
         config.workspace_dir = os.path.dirname(config_file)
         config.device=device
+        config.use_event=use_event
+        config.use_ckpt=use_ckpt
+        config.rgbe_fusion_type=rgbe_fusion_type
+        config.ss_generator_cond_embedder_ckpt_path=ss_generator_cond_embedder_ckpt_path
+        config.slat_generator_cond_embedder_ckpt_path=slat_generator_cond_embedder_ckpt_path
+        config.rgbe_fuser_ckpt_path=rgbe_fuser_ckpt_path
         check_hydra_safety(config, WHITELIST_FILTERS, BLACKLIST_FILTERS)
         self._pipeline: InferencePipelinePointMap = instantiate(config)
 
