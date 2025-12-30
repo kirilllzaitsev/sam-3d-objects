@@ -788,9 +788,11 @@ class InferencePipeline(nn.Module):
         return output
 
     def image_to_float(self, image):
-        image = np.array(image)
         image = image / 255
-        image = image.astype(np.float32)
+        if is_tensor(image):
+            image = image.float()
+        else:
+            image = image.astype(np.float32)
         return image
 
     def preprocess_image(
@@ -900,6 +902,7 @@ class EncoderInferencePipeline(InferencePipeline):
         state_dict_fn=None,
         state_dict_key="state_dict",
         device="cuda",
+        strict=True,
     ):
         model = instantiate(config)
 
@@ -913,7 +916,7 @@ class EncoderInferencePipeline(InferencePipeline):
             model = load_model_from_checkpoint(
                 model,
                 ckpt_path,
-                strict=True,
+                strict=strict,
                 device="cpu",
                 freeze=True,
                 eval=True,
@@ -963,26 +966,11 @@ class EncoderInferencePipeline(InferencePipeline):
     def override_slat_generator_cfg_config(self, *args, **kwargs):
         return None
 
-    def init_ss_condition_embedder(
-        self, ss_generator_config_path, ss_generator_ckpt_path
-    ):
-        conf = OmegaConf.load(
-            os.path.join(self.workspace_dir, ss_generator_config_path)
-        )
-        if "condition_embedder" in conf["module"]:
-            return self.instantiate_and_load_from_pretrained(
-                conf["module"]["condition_embedder"]["backbone"],
-                os.path.join(self.workspace_dir, ss_generator_ckpt_path),
-                state_dict_fn=cp_rgb_weights(filter_and_remove_prefix_state_dict_fn(
-                    "_base_models.condition_embedder."
-                )),
-                device=self.device,
-            )
-        else:
-            return None
-
     def init_slat_condition_embedder(
-        self, slat_generator_config_path, slat_generator_ckpt_path
+        self,
+        slat_generator_config_path,
+        slat_generator_ckpt_path,
+        slat_generator_cond_embedder_ckpt_path=None,
     ):
         return None
 
@@ -1061,18 +1049,26 @@ class EncoderInferencePipeline(InferencePipeline):
         mask: Union[None, np.ndarray, Image.Image],
     ):
         if mask is not None:
-            if isinstance(image, Image.Image):
-                image = np.array(image)
-
-            mask = np.array(mask)
-            if mask.ndim == 2:
+            assert mask.max() > 1, mask.max()
+            while mask.ndim < image.ndim:
                 mask = mask[..., None]
-
-            logger.info(f"Replacing alpha channel with the provided mask")
             assert mask.shape[:2] == image.shape[:2]
-            image = np.concatenate([image[..., :3], mask], axis=-1)
 
-        image = np.array(image)
+        if isinstance(image, torch.Tensor):
+            if mask is not None:
+                mask = cast_to_torch(mask)
+                image = torch.cat([image[..., :3], mask], dim=-1)
+        else:
+            image = cast_to_numpy(image)
+            if mask is not None:
+                if isinstance(image, Image.Image):
+                    image = np.array(image)
+
+                mask = cast_to_numpy(mask)
+
+
+                image = np.concatenate([image[..., :3], mask], axis=-1)
+
         return image
 
     def embed_condition(self, condition_embedder, *args, **kwargs):
@@ -1086,11 +1082,9 @@ class EncoderInferencePipeline(InferencePipeline):
         condition_kwargs = {
             k: v for k, v in input_dict.items() if k not in input_mapping
         }
-        logger.info("Running condition embedder ...")
         embedded_cond, condition_args, condition_kwargs = self.embed_condition(
             condition_embedder, *condition_args, **condition_kwargs
         )
-        logger.info("Condition embedder finishes!")
         if embedded_cond is not None:
             condition_args = (embedded_cond,)
             condition_kwargs = {}
