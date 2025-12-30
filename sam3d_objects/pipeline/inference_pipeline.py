@@ -156,10 +156,15 @@ class InferencePipeline(nn.Module):
 
             # Load conditioner embedder so that we only load it once
             ss_condition_embedder = self.init_ss_condition_embedder(
-                ss_generator_config_path, ss_generator_ckpt_path
+                ss_generator_config_path,
+                ss_generator_ckpt_path,
+                ss_generator_cond_embedder_ckpt_path=ss_generator_cond_embedder_ckpt_path,
+                rgbe_fuser_ckpt_path=rgbe_fuser_ckpt_path,
             )
             slat_condition_embedder = self.init_slat_condition_embedder(
-                slat_generator_config_path, slat_generator_ckpt_path
+                slat_generator_config_path,
+                slat_generator_ckpt_path,
+                slat_generator_cond_embedder_ckpt_path=slat_generator_cond_embedder_ckpt_path,
             )
 
             self.condition_embedders = torch.nn.ModuleDict({
@@ -266,9 +271,13 @@ class InferencePipeline(nn.Module):
         ckpt_path,
         state_dict_fn=None,
         state_dict_key="state_dict",
-        device="cuda", 
+        device="cuda",
+        strict=True,
     ):
         model = instantiate(config)
+
+        if not self.use_ckpt:
+            return model.to(device)
 
         if ckpt_path.endswith(".safetensors"):
             state_dict = load_file(ckpt_path, device="cuda")
@@ -280,7 +289,7 @@ class InferencePipeline(nn.Module):
             model = load_model_from_checkpoint(
                 model,
                 ckpt_path,
-                strict=True,
+                strict=strict,
                 device="cpu",
                 freeze=True,
                 eval=True,
@@ -392,30 +401,75 @@ class InferencePipeline(nn.Module):
         )
 
     def init_ss_condition_embedder(
-        self, ss_generator_config_path, ss_generator_ckpt_path
+        self,
+        ss_generator_config_path,
+        ss_generator_ckpt_path,
+        ss_generator_cond_embedder_ckpt_path=None,
+        rgbe_fuser_ckpt_path=None,
     ):
         conf = OmegaConf.load(
             os.path.join(self.workspace_dir, ss_generator_config_path)
         )
+        conf["module"]["condition_embedder"][
+            "backbone"
+        ].rgbe_fusion_type = self.rgbe_fusion_type
+        conf["module"]["condition_embedder"]["backbone"].use_event = self.use_event
         if "condition_embedder" in conf["module"]:
-            return self.instantiate_and_load_from_pretrained(
+            state_dict_fn = filter_and_remove_prefix_state_dict_fn(
+                "_base_models.condition_embedder."
+            )
+            if self.use_event:
+                state_dict_fn = cp_rgb_weights(state_dict_fn)
+            else:
+                if conf["module"]["condition_embedder"]["backbone"].embedder_list[-1][-1][0][0] == 'event_image':
+                    del conf["module"]["condition_embedder"]["backbone"].embedder_list[-1]
+            model = self.instantiate_and_load_from_pretrained(
                 conf["module"]["condition_embedder"]["backbone"],
                 os.path.join(self.workspace_dir, ss_generator_ckpt_path),
-                state_dict_fn=filter_and_remove_prefix_state_dict_fn(
-                    "_base_models.condition_embedder."
-                ),
+                state_dict_fn=state_dict_fn,
                 device=self.device,
+                strict=not self.use_event,
             )
+            if ss_generator_cond_embedder_ckpt_path is not None:
+                cond_embedder = get_condition_embedder(
+                    None, use_event=True, ss_condition_embedder=model
+                )
+                # change backbone.patch_embed.proj to zeros
+                cond_embedder.backbone.patch_embed.proj.weight.data.zero_()
+                cond_embedder = load_model_from_checkpoint(
+                    cond_embedder,
+                    ss_generator_cond_embedder_ckpt_path,
+                    strict=True,
+                    device=self.device,
+                    freeze=True,
+                    eval=True,
+                    state_dict_fn=None,
+                )
+            if rgbe_fuser_ckpt_path is not None:
+                model.rgbe_fuser = load_model_from_checkpoint(
+                    model.rgbe_fuser,
+                    rgbe_fuser_ckpt_path,
+                    strict=True,
+                    device=self.device,
+                    freeze=True,
+                    eval=True,
+                    state_dict_fn=None,
+                )
+            return model
         else:
             return None
 
     def init_slat_condition_embedder(
-        self, slat_generator_config_path, slat_generator_ckpt_path
+        self,
+        slat_generator_config_path,
+        slat_generator_ckpt_path,
+        slat_generator_cond_embedder_ckpt_path=None,
     ):
         return self.init_ss_condition_embedder(
-            slat_generator_config_path, slat_generator_ckpt_path
+            slat_generator_config_path,
+            slat_generator_ckpt_path,
+            ss_generator_cond_embedder_ckpt_path=slat_generator_cond_embedder_ckpt_path,
         )
-
 
     def override_ss_generator_cfg_config(
         self,
