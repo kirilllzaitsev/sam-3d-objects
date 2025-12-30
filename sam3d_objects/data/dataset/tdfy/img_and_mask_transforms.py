@@ -350,10 +350,8 @@ def crop_around_mask_with_padding(
         mask = mask[None]
 
     res = [rgb_image, mask]
-    if pointmap is not None:
-        res.append(pointmap)
-    if event_image is not None:
-        res.append(event_image)
+    res.append(pointmap)
+    res.append(event_image)
     return res
 
 
@@ -527,10 +525,8 @@ def resize_all_to_same_size(
         mask = mask.squeeze(0)
 
     res = [rgb_image, mask]
-    if pointmap is not None:
-        res.append(pointmap)
-    if event_image is not None:
-        res.append(event_image)
+    res.append(pointmap)
+    res.append(event_image)
     return res
 
 
