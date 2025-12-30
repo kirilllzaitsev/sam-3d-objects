@@ -176,40 +176,32 @@ class InferencePipelinePointMap(InferencePipeline):
         image: Union[Image.Image, np.ndarray],
         preprocessor: PreProcessor,
         pointmap=None,
+        event_image=None,
     ) -> torch.Tensor:
         # canonical type is numpy
-        if not isinstance(image, np.ndarray):
-            image = np.array(image)
+        # if not isinstance(image, np.ndarray):
+        #     image = np.array(image)
 
         assert image.ndim == 3  # no batch dimension as of now
         assert image.shape[-1] == 4  # rgba format
-        assert image.dtype == np.uint8  # [0,255] range
+        # assert image.dtype == np.uint8  # [0,255] range
 
-        rgba_image = torch.from_numpy(self.image_to_float(image))
+        rgba_image = cast_to_torch(self.image_to_float(image))
         rgba_image = rgba_image.permute(2, 0, 1).contiguous()
+
+        if event_image is not None:
+            event_image = cast_to_torch(self.image_to_float(event_image))
+            event_image = event_image.permute(2, 0, 1).contiguous()
         rgb_image = rgba_image[:3]
         rgb_image_mask = get_mask(rgba_image, None, "ALPHA_CHANNEL")
 
         preprocessor_return_dict = preprocessor._process_image_mask_pointmap_mess(
-            rgb_image, rgb_image_mask, pointmap
+            rgb_image, rgb_image_mask, pointmap, event_image=event_image
         )
         
         # Put in a for loop?
         _item = preprocessor_return_dict
-        item = {
-            "mask": _item["mask"][None].to(self.device),
-            "image": _item["image"][None].to(self.device),
-            "rgb_image": _item["rgb_image"][None].to(self.device),
-            "rgb_image_mask": _item["rgb_image_mask"][None].to(self.device),
-        }
-
-        if pointmap is not None and preprocessor.pointmap_transform != (None,):
-            item["pointmap"] = _item["pointmap"][None].to(self.device)
-            item["rgb_pointmap"] = _item["rgb_pointmap"][None].to(self.device)
-            item["pointmap_scale"] = _item["pointmap_scale"][None].to(self.device)
-            item["pointmap_shift"] = _item["pointmap_shift"][None].to(self.device)
-            item["rgb_pointmap_scale"] = _item["rgb_pointmap_scale"][None].to(self.device)
-            item["rgb_pointmap_shift"] = _item["rgb_pointmap_shift"][None].to(self.device)
+        item = {k: v if v is None else v.unsqueeze(0).to(self.device) for k, v in _item.items()}
 
         return item
 
@@ -345,7 +337,7 @@ class InferencePipelinePointMap(InferencePipeline):
                 return self.estimate_plane(pointmap_dict, image)
 
             ss_input_dict = self.preprocess_image(
-                image, self.ss_preprocessor, pointmap=pointmap
+                image, self.ss_preprocessor, pointmap=pointmap, event_image=event_image
             )
 
             slat_input_dict = self.preprocess_image(image, self.slat_preprocessor)
@@ -704,15 +696,18 @@ class EncoderInferencePipelinePointMap(EncoderInferencePipeline):
         event_image=None,
     ) -> torch.Tensor:
         # canonical type is numpy
-        if not isinstance(image, np.ndarray):
-            image = np.array(image)
+        # if not isinstance(image, np.ndarray):
+        #     image = np.array(image)
 
         assert image.ndim == 3  # no batch dimension as of now
         assert image.shape[-1] == 4  # rgba format
-        assert image.dtype == np.uint8  # [0,255] range
+        # assert image.dtype == np.uint8  # [0,255] range
 
-        rgba_image = torch.from_numpy(self.image_to_float(image))
+        rgba_image = cast_to_torch(self.image_to_float(image))
         rgba_image = rgba_image.permute(2, 0, 1).contiguous()
+        if event_image is not None:
+            event_image = cast_to_torch(self.image_to_float(event_image))
+            event_image = event_image.permute(2, 0, 1).contiguous()
         rgb_image = rgba_image[:3]
         rgb_image_mask = get_mask(rgba_image, None, "ALPHA_CHANNEL")
 
