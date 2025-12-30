@@ -1098,15 +1098,54 @@ class EncoderInferencePipeline(InferencePipeline):
         image = ss_input_dict["image"]
         bs = image.shape[0]
 
-        with torch.no_grad():
-            with torch.autocast(device_type="cuda", dtype=self.shape_model_dtype):
-                condition_args, condition_kwargs = self.get_condition_input(
-                    self.condition_embedders["ss_condition_embedder"],
-                    ss_input_dict,
-                    self.ss_condition_input_mapping,
-                )
+        # ss_generator = self.models["ss_generator"]
+        # if use_distillation:
+        #     ss_generator.no_shortcut = False
+        #     ss_generator.reverse_fn.strength = 0
+        #     ss_generator.reverse_fn.strength_pm = 0
+        # else:
+        #     ss_generator.no_shortcut = True
+        #     ss_generator.reverse_fn.strength = self.ss_cfg_strength
+        #     ss_generator.reverse_fn.strength_pm = self.ss_cfg_strength_pm
 
+        # prev_inference_steps = ss_generator.inference_steps
+        # if inference_steps:
+        #     ss_generator.inference_steps = inference_steps
+
+        # image = ss_input_dict["image"]
+        # bs = image.shape[0]
+        # logger.info(
+        #     "Sampling sparse structure: inference_steps={}, strength={}, interval={}, rescale_t={}, cfg_strength_pm={}",
+        #     ss_generator.inference_steps,
+        #     ss_generator.reverse_fn.strength,
+        #     ss_generator.reverse_fn.interval,
+        #     ss_generator.rescale_t,
+        #     ss_generator.reverse_fn.strength_pm,
+        # )
+
+        with torch.autocast(device_type="cuda", dtype=self.shape_model_dtype):
+            # if self.is_mm_dit():
+            #     latent_shape_dict = {
+            #         k: (bs,) + (v.pos_emb.shape[0], v.input_layer.in_features)
+            #         for k, v in ss_generator.reverse_fn.backbone.latent_mapping.items()
+            #     }
+            # else:
+            #     latent_shape_dict = (bs,) + (4096, 8)
+            condition_args, condition_kwargs = self.get_condition_input(
+                self.condition_embedders["ss_condition_embedder"],
+                ss_input_dict,
+                self.ss_condition_input_mapping,
+            )
+            # return_dict = ss_generator(
+            #     latent_shape_dict,
+            #     image.device,
+            #     *condition_args,
+            #     **condition_kwargs,
+            # )
+
+        # ss_generator.inference_steps = prev_inference_steps
         return {
             "condition_args": condition_args,
             "condition_kwargs": condition_kwargs,
+            # "return_dict": return_dict,
         }
