@@ -176,6 +176,7 @@ class InferencePipeline(nn.Module):
                 ss_generator_ckpt_path,
                 ss_generator_cond_embedder_ckpt_path=ss_generator_cond_embedder_ckpt_path,
                 rgbe_fuser_ckpt_path=rgbe_fuser_ckpt_path,
+                use_event=self.use_event,
             )
             slat_condition_embedder = self.init_slat_condition_embedder(
                 slat_generator_config_path,
@@ -422,6 +423,7 @@ class InferencePipeline(nn.Module):
         ss_generator_ckpt_path,
         ss_generator_cond_embedder_ckpt_path=None,
         rgbe_fuser_ckpt_path=None,
+        use_event=False
     ):
         conf = OmegaConf.load(
             os.path.join(self.workspace_dir, ss_generator_config_path)
@@ -429,12 +431,12 @@ class InferencePipeline(nn.Module):
         conf["module"]["condition_embedder"][
             "backbone"
         ].rgbe_fusion_type = self.rgbe_fusion_type
-        conf["module"]["condition_embedder"]["backbone"].use_event = self.use_event
+        conf["module"]["condition_embedder"]["backbone"].use_event = use_event
         if "condition_embedder" in conf["module"]:
             state_dict_fn = filter_and_remove_prefix_state_dict_fn(
                 "_base_models.condition_embedder."
             )
-            if self.use_event:
+            if use_event:
                 state_dict_fn = cp_rgb_weights(state_dict_fn)
             else:
                 if conf["module"]["condition_embedder"]["backbone"].embedder_list[-1][-1][0][0] == 'event_image':
@@ -444,7 +446,7 @@ class InferencePipeline(nn.Module):
                 os.path.join(self.workspace_dir, ss_generator_ckpt_path),
                 state_dict_fn=state_dict_fn,
                 device=self.device,
-                strict=not self.use_event,
+                strict=not use_event,
             )
             if ss_generator_cond_embedder_ckpt_path is not None:
                 cond_embedder = get_condition_embedder(
@@ -485,6 +487,7 @@ class InferencePipeline(nn.Module):
             slat_generator_config_path,
             slat_generator_ckpt_path,
             ss_generator_cond_embedder_ckpt_path=slat_generator_cond_embedder_ckpt_path,
+            use_event=False
         )
 
     def override_ss_generator_cfg_config(
