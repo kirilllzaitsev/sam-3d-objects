@@ -7,6 +7,9 @@ from loguru import logger
 from torch.utils._pytree import tree_map_only
 from tqdm import tqdm
 
+from event_sam3d.img2event.model_utils import get_condition_embedder
+from event_sam3d.utils.common_utils import cast_to_numpy, cast_to_torch
+
 
 def set_attention_backend():
     if torch.cuda.is_available():
@@ -46,7 +49,7 @@ from sam3d_objects.pipeline.inference_utils import (
     get_pose_decoder,
     prune_sparse_structure,
 )
-from torch import nn
+from torch import is_tensor, nn
 
 
 class InferencePipeline(nn.Module):
@@ -66,6 +69,9 @@ class InferencePipeline(nn.Module):
         slat_decoder_gs_4_ckpt_path=None,
         ss_encoder_config_path=None,
         ss_encoder_ckpt_path=None,
+        ss_generator_cond_embedder_ckpt_path=None,
+        slat_generator_cond_embedder_ckpt_path=None,
+        rgbe_fuser_ckpt_path=None,
         decode_formats=["gaussian", "mesh"],
         dtype="bfloat16",
         pad_size=1.0,
@@ -92,11 +98,21 @@ class InferencePipeline(nn.Module):
         compile_model=False,
         slat_mean=SLAT_MEAN,
         slat_std=SLAT_STD,
+        use_event=False,
+        rgbe_fusion_type="gated",
+        use_ckpt=True,
     ):
         super().__init__()
         self.rendering_engine = rendering_engine
         self.device = torch.device(device)
         self.compile_model = compile_model
+        self.use_event = use_event
+        self.use_ckpt = use_ckpt
+        self.rgbe_fusion_type = rgbe_fusion_type
+        self.ss_generator_cond_embedder_ckpt_path = ss_generator_cond_embedder_ckpt_path
+        self.slat_generator_cond_embedder_ckpt_path = (
+            slat_generator_cond_embedder_ckpt_path
+        )
         logger.info(f"self.device: {self.device}")
         logger.info(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', None)}")
         logger.info(f"Actually using GPU: {torch.cuda.current_device()}")
