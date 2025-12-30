@@ -209,7 +209,12 @@ def load_model_from_checkpoint(
     if state_dict_fn is not None:
         state_dict = state_dict_fn(state_dict)
 
-    model.load_state_dict(state_dict, strict=strict)
+    missing, unexpected = model.load_state_dict(state_dict, strict=strict)
+
+    if len(missing) > 0:
+        logger.warning(f"Missing keys when loading checkpoint: {missing}")
+    if len(unexpected) > 0:
+        logger.warning(f"Unexpected keys when loading checkpoint: {unexpected}")
 
     if device is not None:
         model = model.to(device)
