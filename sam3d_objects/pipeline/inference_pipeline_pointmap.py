@@ -1,4 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+from collections import defaultdict
 from copy import deepcopy
 from typing import Optional, Union
 
@@ -7,6 +8,7 @@ import torch
 import torchvision
 from loguru import logger
 from PIL import Image
+from event_sam3d.utils.common_utils import cast_to_torch
 from pytorch3d.renderer import look_at_view_transform
 from pytorch3d.transforms import Transform3d
 from sam3d_objects.data.dataset.tdfy.img_and_mask_transforms import get_mask
@@ -495,10 +497,9 @@ class InferencePipelinePointMap(InferencePipeline):
         pointmap=None,
         event_image=None
     ):
-        image = self.merge_mask_to_rgba(image, mask)
         return self.run(
             image=image,
-            mask=None,
+            mask=mask,
             seed=seed,
             stage1_only=False,
             with_mesh_postprocess=False,
@@ -510,13 +511,6 @@ class InferencePipelinePointMap(InferencePipeline):
             decode_formats=['gaussian'],
             event_image=event_image,
         )
-
-    def merge_mask_to_rgba(self, image, mask):
-        mask = mask.astype(np.uint8) * 255
-        mask = mask[..., None]
-        # embed mask in alpha channel
-        rgba_image = np.concatenate([image[..., :3], mask], axis=-1)
-        return rgba_image
 
 
 class EncoderInferencePipelinePointMap(EncoderInferencePipeline):
@@ -765,17 +759,27 @@ class EncoderInferencePipelinePointMap(EncoderInferencePipeline):
     ) -> dict:
         image = self.merge_image_and_mask(image, mask)
         with self.device:
-            pointmap_dict = self.compute_pointmap(image, pointmap)
-            pointmap = pointmap_dict["pointmap"]
-            pts = type(self)._down_sample_img(pointmap)
-            pts_colors = type(self)._down_sample_img(pointmap_dict["pts_color"])
-
-            # if estimate_plane:
-            #     return self.estimate_plane(pointmap_dict, image)
-
-            ss_input_dict = self.preprocess_image(
-                image, self.ss_preprocessor, pointmap=pointmap, event_image=event_image
-            )
+            if image.ndim == 4:
+                ss_input_dict = defaultdict(list)
+                for bidx in range(len(image)):
+                    pointmap_ = None
+                    # pointmap_dict = self.compute_pointmap(image[bidx], pointmap)
+                    # pointmap_ = pointmap_dict["pointmap"]
+                    # pts = type(self)._down_sample_img(pointmap_)
+                    # pts_colors = type(self)._down_sample_img(pointmap_dict["pts_color"])
+                    ss_input_dict_ = self.preprocess_image(
+                        image[bidx], self.ss_preprocessor, pointmap=pointmap_, event_image=None if event_image is None else event_image[bidx]
+                    )
+                    for k,v in ss_input_dict_.items():
+                        ss_input_dict[k].append(v)
+                ss_input_dict = {k: v if v[0] is None else torch.cat(v, dim=0) for k,v in ss_input_dict.items()}
+            else:
+                # pointmap_dict = self.compute_pointmap(image, pointmap)
+                # pointmap = pointmap_dict["pointmap"]
+                pointmap = None
+                ss_input_dict = self.preprocess_image(
+                    image, self.ss_preprocessor, pointmap=pointmap, event_image=event_image
+                )
 
             if seed is not None:
                 torch.manual_seed(seed)
@@ -786,10 +790,9 @@ class EncoderInferencePipelinePointMap(EncoderInferencePipeline):
             )
 
             # glb.export("sample.glb")
-            logger.info("Finished!")
 
             return {
                 **ss_return_dict,
-                "pointmap": pts.cpu().permute((1, 2, 0)),  # HxWx3
-                "pointmap_colors": pts_colors.cpu().permute((1, 2, 0)),  # HxWx3
+                # "pointmap": pts.cpu().permute((1, 2, 0)),  # HxWx3
+                # "pointmap_colors": pts_colors.cpu().permute((1, 2, 0)),  # HxWx3
             }
