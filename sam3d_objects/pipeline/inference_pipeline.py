@@ -647,18 +647,26 @@ class InferencePipeline(nn.Module):
         mask: Union[None, np.ndarray, Image.Image],
     ):
         if mask is not None:
-            if isinstance(image, Image.Image):
-                image = np.array(image)
-
-            mask = np.array(mask)
-            if mask.ndim == 2:
+            assert mask.max() > 1, mask.max()
+            while mask.ndim < image.ndim:
                 mask = mask[..., None]
-
-            logger.info(f"Replacing alpha channel with the provided mask")
             assert mask.shape[:2] == image.shape[:2]
-            image = np.concatenate([image[..., :3], mask], axis=-1)
 
-        image = np.array(image)
+        if isinstance(image, torch.Tensor):
+            if mask is not None:
+                mask = cast_to_torch(mask)
+                image = torch.cat([image[..., :3], mask], dim=-1)
+        else:
+            image = cast_to_numpy(image)
+            if mask is not None:
+                if isinstance(image, Image.Image):
+                    image = np.array(image)
+
+                mask = cast_to_numpy(mask)
+
+
+                image = np.concatenate([image[..., :3], mask], axis=-1)
+
         return image
 
     def decode_slat(
@@ -1115,34 +1123,6 @@ class EncoderInferencePipeline(InferencePipeline):
                 **ss_return_dict,
                 **outputs,
             }
-
-    def merge_image_and_mask(
-        self,
-        image: Union[np.ndarray, Image.Image],
-        mask: Union[None, np.ndarray, Image.Image],
-    ):
-        if mask is not None:
-            assert mask.max() > 1, mask.max()
-            while mask.ndim < image.ndim:
-                mask = mask[..., None]
-            assert mask.shape[:2] == image.shape[:2]
-
-        if isinstance(image, torch.Tensor):
-            if mask is not None:
-                mask = cast_to_torch(mask)
-                image = torch.cat([image[..., :3], mask], dim=-1)
-        else:
-            image = cast_to_numpy(image)
-            if mask is not None:
-                if isinstance(image, Image.Image):
-                    image = np.array(image)
-
-                mask = cast_to_numpy(mask)
-
-
-                image = np.concatenate([image[..., :3], mask], axis=-1)
-
-        return image
 
     def embed_condition(self, condition_embedder, *args, **kwargs):
         if condition_embedder is not None:
