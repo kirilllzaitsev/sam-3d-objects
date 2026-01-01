@@ -110,7 +110,8 @@ class Inference:
         self._pipeline: InferencePipelinePointMap = instantiate(config)
 
     def merge_mask_to_rgba(self, image, mask):
-        mask = mask.astype(np.uint8) * 255
+        if mask.max() <= 1:
+            mask = mask.astype(np.uint8) * 255
         mask = mask[..., None]
         # embed mask in alpha channel
         rgba_image = np.concatenate([image[..., :3], mask], axis=-1)
