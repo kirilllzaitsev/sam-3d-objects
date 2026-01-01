@@ -84,6 +84,8 @@ class PreProcessor:
 
         # Apply transforms to the original full rgb image and mask. (not used according to yaml)
         rgb_image, rgb_image_mask = self._preprocess_rgb_image_mask(rgb_image, rgb_image_mask)
+        if event_image is not None:
+            event_image, _ = self._preprocess_rgb_image_mask(event_image, rgb_image_mask)
 
         # These two are typically used for getting cropped images of the object
         #   : first apply joint transforms
@@ -174,13 +176,12 @@ class PreProcessor:
         if (
             self.img_mask_pointmap_joint_transform != (None,)
             and self.img_mask_pointmap_joint_transform is not None
-            and pointmap is not None
         ):
             for trans in self.img_mask_pointmap_joint_transform:
                 rgb_image, mask_image, pointmap, event_image = trans(
                     rgb_image, mask_image, pointmap=pointmap, event_image=event_image
                 )
-            return rgb_image, mask_image, pointmap, event_image
+            # return rgb_image, mask_image, pointmap, event_image
 
         # Fallback: img_mask_joint_transform (existing behavior)
         elif (
@@ -188,8 +189,8 @@ class PreProcessor:
             and self.img_mask_joint_transform is not None
         ):
             for trans in self.img_mask_joint_transform:
-                rgb_image, mask_image = trans(rgb_image, mask_image)
-            return rgb_image, mask_image, pointmap
+                rgb_image, mask_image, pointmap, event_image = trans(rgb_image, mask_image)
+            # return rgb_image, mask_image, pointmap
 
         return rgb_image, mask_image, pointmap, event_image
 
