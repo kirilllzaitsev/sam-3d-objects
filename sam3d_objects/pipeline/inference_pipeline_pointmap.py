@@ -92,6 +92,67 @@ def compile_wrapper(
     return compiled_fn_wrapper
 
 
+def preprocess_image(
+    self,
+    image: Union[Image.Image, np.ndarray],
+    preprocessor: PreProcessor,
+    pointmap=None,
+    event_image=None,
+) -> torch.Tensor:
+    # canonical type is numpy
+    # if not isinstance(image, np.ndarray):
+    #     image = np.array(image)
+
+    assert image.ndim == 3  # no batch dimension as of now
+    assert image.shape[-1] == 4  # rgba format
+    # assert image.dtype == np.uint8  # [0,255] range
+
+    rgba_image = cast_to_torch(self.image_to_float(image))
+    rgba_image = rgba_image.permute(2, 0, 1).contiguous()
+
+    if event_image is not None:
+        event_image = cast_to_torch(self.image_to_float(event_image))
+        event_image = event_image.permute(2, 0, 1).contiguous()
+    rgb_image = rgba_image[:3]
+    rgb_image_mask = get_mask(rgba_image, None, "ALPHA_CHANNEL")
+
+    preprocessor_return_dict = preprocessor._process_image_mask_pointmap_mess(
+        rgb_image, rgb_image_mask, pointmap, event_image=event_image
+    )
+    
+    # Put in a for loop?
+    _item = preprocessor_return_dict
+    item = {k: v if v is None else v.unsqueeze(0).to(self.device) for k, v in _item.items()}
+
+    return item
+
+
+def _down_sample_img(img_3chw: torch.Tensor):
+    # img_3chw: (3, H, W)
+    x = img_3chw.unsqueeze(0)
+    if x.dtype == torch.uint8:
+        x = x.float() / 255.0
+    max_side = max(x.shape[2], x.shape[3])
+    scale_factor = 1.0
+
+    # heuristics
+    if max_side > 3800:
+        scale_factor = 0.125
+    if max_side > 1900:
+        scale_factor = 0.25
+    elif max_side > 1200:
+        scale_factor = 0.5
+
+    x = torch.nn.functional.interpolate(
+        x,
+        scale_factor=(scale_factor, scale_factor),
+        mode="bilinear",
+        align_corners=False,
+        antialias=True,
+    )  # -> (1, 3, H/4, W/4)
+    return x.squeeze(0)
+
+
 class InferencePipelinePointMap(InferencePipeline):
 
     def __init__(
@@ -151,8 +212,8 @@ class InferencePipelinePointMap(InferencePipeline):
                     pointmap_dict = recursive_clone(self.compute_pointmap(image))
                     pointmap = pointmap_dict["pointmap"]
 
-                    ss_input_dict = self.preprocess_image(
-                        image, self.ss_preprocessor, pointmap=pointmap
+                    ss_input_dict = preprocess_image(
+                        self, image, self.ss_preprocessor, pointmap=pointmap
                     )
                     ss_return_dict = self.sample_sparse_structure(
                         ss_input_dict, inference_steps=None
@@ -172,40 +233,6 @@ class InferencePipelinePointMap(InferencePipeline):
                 rgb_image, mask_image, pointmap=pointmap
             )
         return rgb_image, mask_image, pointmap
-
-    def preprocess_image(
-        self,
-        image: Union[Image.Image, np.ndarray],
-        preprocessor: PreProcessor,
-        pointmap=None,
-        event_image=None,
-    ) -> torch.Tensor:
-        # canonical type is numpy
-        # if not isinstance(image, np.ndarray):
-        #     image = np.array(image)
-
-        assert image.ndim == 3  # no batch dimension as of now
-        assert image.shape[-1] == 4  # rgba format
-        # assert image.dtype == np.uint8  # [0,255] range
-
-        rgba_image = cast_to_torch(self.image_to_float(image))
-        rgba_image = rgba_image.permute(2, 0, 1).contiguous()
-
-        if event_image is not None:
-            event_image = cast_to_torch(self.image_to_float(event_image))
-            event_image = event_image.permute(2, 0, 1).contiguous()
-        rgb_image = rgba_image[:3]
-        rgb_image_mask = get_mask(rgba_image, None, "ALPHA_CHANNEL")
-
-        preprocessor_return_dict = preprocessor._process_image_mask_pointmap_mess(
-            rgb_image, rgb_image_mask, pointmap, event_image=event_image
-        )
-        
-        # Put in a for loop?
-        _item = preprocessor_return_dict
-        item = {k: v if v is None else v.unsqueeze(0).to(self.device) for k, v in _item.items()}
-
-        return item
 
     def _clip_pointmap(self, pointmap: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if self.clip_pointmap_beyond_scale is None:
@@ -332,17 +359,17 @@ class InferencePipelinePointMap(InferencePipeline):
         with self.device: 
             pointmap_dict = self.compute_pointmap(image, pointmap)
             pointmap = pointmap_dict["pointmap"]
-            pts = type(self)._down_sample_img(pointmap)
-            pts_colors = type(self)._down_sample_img(pointmap_dict["pts_color"])
+            pts = _down_sample_img(pointmap)
+            pts_colors = _down_sample_img(pointmap_dict["pts_color"])
 
             if estimate_plane:
                 return self.estimate_plane(pointmap_dict, image)
 
-            ss_input_dict = self.preprocess_image(
-                image, self.ss_preprocessor, pointmap=pointmap, event_image=event_image
+            ss_input_dict = preprocess_image(
+                self, image, self.ss_preprocessor, pointmap=pointmap, event_image=event_image
             )
 
-            slat_input_dict = self.preprocess_image(image, self.slat_preprocessor)
+            slat_input_dict = preprocess_image(self, image, self.slat_preprocessor)
             if seed is not None:
                 torch.manual_seed(seed)
             ss_return_dict = self.sample_sparse_structure(
@@ -419,37 +446,11 @@ class InferencePipelinePointMap(InferencePipeline):
                 "pointmap_colors": pts_colors.cpu().permute((1, 2, 0)),  # HxWx3
             }
 
-    @staticmethod
-    def _down_sample_img(img_3chw: torch.Tensor):
-        # img_3chw: (3, H, W)
-        x = img_3chw.unsqueeze(0)
-        if x.dtype == torch.uint8:
-            x = x.float() / 255.0
-        max_side = max(x.shape[2], x.shape[3])
-        scale_factor = 1.0
-
-        # heuristics
-        if max_side > 3800:
-            scale_factor = 0.125
-        if max_side > 1900:
-            scale_factor = 0.25
-        elif max_side > 1200:
-            scale_factor = 0.5
-
-        x = torch.nn.functional.interpolate(
-            x,
-            scale_factor=(scale_factor, scale_factor),
-            mode="bilinear",
-            align_corners=False,
-            antialias=True,
-        )  # -> (1, 3, H/4, W/4)
-        return x.squeeze(0)
-
     def estimate_plane(self, pointmap_dict, image, ground_area_threshold=0.25, min_points=100):
         assert image.shape[-1] == 4  # rgba format
         # Extract mask from alpha channel
-        floor_mask = type(self)._down_sample_img(torch.from_numpy(image[..., -1]).float().unsqueeze(0))[0] > 0.5
-        pts = type(self)._down_sample_img(pointmap_dict["pointmap"])
+        floor_mask = _down_sample_img(torch.from_numpy(image[..., -1]).float().unsqueeze(0))[0] > 0.5
+        pts = _down_sample_img(pointmap_dict["pointmap"])
 
         # Get all points in 3D space (H, W, 3)
         pts_hwc = pts.cpu().permute((1, 2, 0))
@@ -566,154 +567,12 @@ class EncoderInferencePipelinePointMap(EncoderInferencePipeline):
                     pointmap_dict = recursive_clone(self.compute_pointmap(image))
                     pointmap = pointmap_dict["pointmap"]
 
-                    ss_input_dict = self.preprocess_image(
-                        image, self.ss_preprocessor, pointmap=pointmap, event_image=event_image
+                    ss_input_dict = preprocess_image(
+                        self, image, self.ss_preprocessor, pointmap=pointmap, event_image=event_image
                     )
                     ss_return_dict = self.sample_sparse_structure(
                         ss_input_dict, inference_steps=None
                     )
-
-    def _clip_pointmap(
-        self, pointmap: torch.Tensor, mask: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.clip_pointmap_beyond_scale is None:
-            return pointmap
-
-        pointmap_size = (pointmap.shape[1], pointmap.shape[2])
-        if mask.dim() == 2:
-            mask = mask.unsqueeze(0)
-        mask_resized = torchvision.transforms.functional.resize(
-            mask,
-            pointmap_size,
-            interpolation=torchvision.transforms.InterpolationMode.NEAREST,
-        ).squeeze(0)
-
-        pointmap_flat = pointmap.reshape(3, -1)
-        # Get valid points from the mask
-        mask_bool = mask_resized.reshape(-1) > 0.5
-        mask_points = pointmap_flat[:, mask_bool]
-        mask_distance = mask_points.nanmedian(dim=-1).values[-1]
-        logger.info(f"mask_distance: {mask_distance}")
-        pointmap_clipped_flat = torch.where(
-            pointmap_flat[2, ...].abs()
-            > self.clip_pointmap_beyond_scale * mask_distance,
-            torch.full_like(pointmap_flat, float("nan")),
-            pointmap_flat,
-        )
-        pointmap_clipped = pointmap_clipped_flat.reshape(pointmap.shape)
-        return pointmap_clipped
-
-    def compute_pointmap(self, image, pointmap=None):
-        loaded_image = self.image_to_float(image)
-        loaded_image = torch.from_numpy(loaded_image)
-        loaded_mask = loaded_image[..., -1]
-        loaded_image = loaded_image.permute(2, 0, 1).contiguous()[:3]
-
-        if pointmap is None:
-            with torch.no_grad():
-                with torch.autocast(device_type="cuda", dtype=self.dtype):
-                    output = self.depth_model(loaded_image)
-            pointmaps = output["pointmaps"]
-            camera_convention_transform = (
-                Transform3d()
-                .rotate(camera_to_pytorch3d_camera(device=self.device).rotation)
-                .to(self.device)
-            )
-            points_tensor = camera_convention_transform.transform_points(pointmaps)
-            intrinsics = output.get("intrinsics", None)
-        else:
-            output = {}
-            points_tensor = pointmap.to(self.device)
-            if loaded_image.shape != points_tensor.shape:
-                # Interpolate points_tensor to match loaded_image size
-                # loaded_image has shape [3, H, W], we need H and W
-                points_tensor = (
-                    torch.nn.functional.interpolate(
-                        points_tensor.permute(2, 0, 1).unsqueeze(0),
-                        size=(loaded_image.shape[1], loaded_image.shape[2]),
-                        mode="nearest",
-                    )
-                    .squeeze(0)
-                    .permute(1, 2, 0)
-                )
-            intrinsics = None
-
-        points_tensor = points_tensor.permute(2, 0, 1)
-        points_tensor = self._clip_pointmap(points_tensor, loaded_mask)
-
-        # Prepare the point map tensor
-        point_map_tensor = {
-            "pointmap": points_tensor,
-            "pts_color": loaded_image,
-        }
-
-        # If depth model doesn't provide intrinsics, infer them
-        if intrinsics is None:
-            intrinsics_result = infer_intrinsics_from_pointmap(
-                points_tensor.permute(1, 2, 0), device=self.device
-            )
-            point_map_tensor["intrinsics"] = intrinsics_result["intrinsics"]
-
-        return point_map_tensor
-
-    @staticmethod
-    def _down_sample_img(img_3chw: torch.Tensor):
-        # img_3chw: (3, H, W)
-        x = img_3chw.unsqueeze(0)
-        if x.dtype == torch.uint8:
-            x = x.float() / 255.0
-        max_side = max(x.shape[2], x.shape[3])
-        scale_factor = 1.0
-
-        # heuristics
-        if max_side > 3800:
-            scale_factor = 0.125
-        if max_side > 1900:
-            scale_factor = 0.25
-        elif max_side > 1200:
-            scale_factor = 0.5
-
-        x = torch.nn.functional.interpolate(
-            x,
-            scale_factor=(scale_factor, scale_factor),
-            mode="bilinear",
-            align_corners=False,
-            antialias=True,
-        )  # -> (1, 3, H/4, W/4)
-        return x.squeeze(0)
-
-    def preprocess_image(
-        self,
-        image: Union[Image.Image, np.ndarray],
-        preprocessor: PreProcessor,
-        pointmap=None,
-        event_image=None,
-    ) -> torch.Tensor:
-        # canonical type is numpy
-        # if not isinstance(image, np.ndarray):
-        #     image = np.array(image)
-
-        assert image.ndim == 3  # no batch dimension as of now
-        assert image.shape[-1] == 4  # rgba format
-        # assert image.dtype == np.uint8  # [0,255] range
-
-        rgba_image = cast_to_torch(self.image_to_float(image))
-        rgba_image = rgba_image.permute(2, 0, 1).contiguous()
-        if event_image is not None:
-            event_image = cast_to_torch(self.image_to_float(event_image))
-            event_image = event_image.permute(2, 0, 1).contiguous()
-        rgb_image = rgba_image[:3]
-        rgb_image_mask = get_mask(rgba_image, None, "ALPHA_CHANNEL")
-
-        preprocessor_return_dict = preprocessor._process_image_mask_pointmap_mess(
-            rgb_image, rgb_image_mask, pointmap, event_image=event_image
-        )
-
-        # Put in a for loop?
-        _item = preprocessor_return_dict
-        item = {k: v[None].to(self.device) for k, v in _item.items() if v is not None}
-
-        return item
 
     def forward(
         self, 
@@ -765,10 +624,10 @@ class EncoderInferencePipelinePointMap(EncoderInferencePipeline):
                     pointmap_ = None
                     # pointmap_dict = self.compute_pointmap(image[bidx], pointmap)
                     # pointmap_ = pointmap_dict["pointmap"]
-                    # pts = type(self)._down_sample_img(pointmap_)
-                    # pts_colors = type(self)._down_sample_img(pointmap_dict["pts_color"])
-                    ss_input_dict_ = self.preprocess_image(
-                        image[bidx], self.ss_preprocessor, pointmap=pointmap_, event_image=None if event_image is None else event_image[bidx]
+                    # pts = _down_sample_img(pointmap_)
+                    # pts_colors = _down_sample_img(pointmap_dict["pts_color"])
+                    ss_input_dict_ = preprocess_image(
+                        self, image[bidx], self.ss_preprocessor, pointmap=pointmap_, event_image=None if event_image is None else event_image[bidx]
                     )
                     for k,v in ss_input_dict_.items():
                         ss_input_dict[k].append(v)
@@ -777,8 +636,8 @@ class EncoderInferencePipelinePointMap(EncoderInferencePipeline):
                 # pointmap_dict = self.compute_pointmap(image, pointmap)
                 # pointmap = pointmap_dict["pointmap"]
                 pointmap = None
-                ss_input_dict = self.preprocess_image(
-                    image, self.ss_preprocessor, pointmap=pointmap, event_image=event_image
+                ss_input_dict = preprocess_image(
+                    self, image, self.ss_preprocessor, pointmap=pointmap, event_image=event_image
                 )
 
             if seed is not None:
