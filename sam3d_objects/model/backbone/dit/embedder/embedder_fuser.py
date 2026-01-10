@@ -115,7 +115,7 @@ class EmbedderFuser(torch.nn.Module):
                     attn_type="ca"
                 else:
                     attn_type="sa"
-                self.rgbe_fuser = TokenFusionTransformer(dim=1024, heads=8, depth=1, attn_type=attn_type)
+                self.rgbe_fuser = TokenFusionTransformer(dim=1024, heads=8, depth=2, attn_type=attn_type)
 
     def _make_projection_net(
         self,
@@ -244,9 +244,8 @@ class EmbedderFuser(torch.nn.Module):
                         )
                 tokens.append(cond_token)
                 kwarg_names.append(kwarg_name)
-                if self.use_event:
-                    if kwarg_name in ['image', 'rgb_image', 'rgb_event_image', 'event_image']:
-                        fusion_idxs[kwarg_name]=(len(tokens)-1)
+                if kwarg_name in ['image', 'rgb_image', 'rgb_event_image', 'event_image']:
+                    fusion_idxs[kwarg_name]=(len(tokens)-1)
 
         if self.use_event:
             tokens[fusion_idxs['rgb_image']] = self.rgbe_fuser(
@@ -264,9 +263,9 @@ class EmbedderFuser(torch.nn.Module):
         tokens = self._dropout_modalities(kwarg_names, tokens)
 
         if self.compression_projection_multiplier > 0:
-            tokens = torch.cat(tokens, dim=-1)
-            tokens = self.compression_projector(tokens)
+            cat_tokens = torch.cat(tokens, dim=-1)
+            cat_tokens = self.compression_projector(cat_tokens)
         else:
-            tokens = torch.cat(tokens, dim=1)
+            cat_tokens = torch.cat(tokens, dim=1)
 
-        return tokens
+        return {"cat_tokens": cat_tokens, "image_tokens": tokens[fusion_idxs['image']], "rgb_image_tokens": tokens[fusion_idxs['rgb_image']]}
