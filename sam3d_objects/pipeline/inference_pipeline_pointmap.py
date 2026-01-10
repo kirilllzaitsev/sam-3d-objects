@@ -496,7 +496,8 @@ class InferencePipelinePointMap(InferencePipeline):
         mask: Optional[Union[None, Image.Image, np.ndarray]],
         seed: Optional[int] = 42,
         pointmap=None,
-        event_image=None
+        event_image=None,
+        decode_formats=['gaussian'],
     ):
         return self.run(
             image=image,
@@ -509,7 +510,7 @@ class InferencePipelinePointMap(InferencePipeline):
             use_vertex_color=True,
             stage1_inference_steps=None,
             pointmap=pointmap,
-            decode_formats=['gaussian'],
+            decode_formats=decode_formats,
             event_image=event_image,
         )
 
@@ -580,7 +581,8 @@ class EncoderInferencePipelinePointMap(EncoderInferencePipeline):
         mask: Optional[Union[None, Image.Image, np.ndarray]],
         seed: Optional[int] = 42,
         pointmap=None,
-        event_image=None
+        event_image=None,
+        decode_formats=['gaussian'],
     ):
         return self.run(
             image=image,
@@ -593,7 +595,7 @@ class EncoderInferencePipelinePointMap(EncoderInferencePipeline):
             use_vertex_color=True,
             stage1_inference_steps=None,
             pointmap=pointmap,
-            decode_formats=['gaussian'],
+            decode_formats=decode_formats,
             event_image=event_image,
         )
 

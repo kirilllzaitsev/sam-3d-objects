@@ -22,8 +22,8 @@ import numpy as np
 import gradio as gr
 import matplotlib.pyplot as plt
 from copy import deepcopy
-from kaolin.visualize import IpyTurntableVisualizer
-from kaolin.render.camera import Camera, CameraExtrinsics, PinholeIntrinsics
+# from kaolin.visualize import IpyTurntableVisualizer
+# from kaolin.render.camera import Camera, CameraExtrinsics, PinholeIntrinsics
 import builtins
 from pytorch3d.transforms import quaternion_multiply, quaternion_invert
 
@@ -124,6 +124,7 @@ class Inference:
         seed: Optional[int] = None,
         pointmap=None,
         event_image=None,
+        decode_formats=['gaussian'],
     ) -> dict:
         image = self.merge_mask_to_rgba(image, mask)
         return self._pipeline.run(
@@ -137,7 +138,7 @@ class Inference:
             use_vertex_color=True,
             stage1_inference_steps=None,
             pointmap=pointmap,
-            decode_formats=['gaussian'],
+            decode_formats=decode_formats,
             event_image=event_image,
         )
 
