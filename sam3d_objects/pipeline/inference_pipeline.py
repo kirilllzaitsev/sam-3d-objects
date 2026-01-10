@@ -702,7 +702,8 @@ class InferencePipeline(nn.Module):
 
     def embed_condition(self, condition_embedder, *args, **kwargs):
         if condition_embedder is not None:
-            tokens = condition_embedder(*args, **kwargs)
+            out = condition_embedder(*args, **kwargs)
+            tokens = out['cat_tokens']
             return tokens, None, None
         return None, args, kwargs
 
@@ -1123,12 +1124,6 @@ class EncoderInferencePipeline(InferencePipeline):
                 **ss_return_dict,
                 **outputs,
             }
-
-    def embed_condition(self, condition_embedder, *args, **kwargs):
-        if condition_embedder is not None:
-            tokens = condition_embedder(*args, **kwargs)
-            return tokens, None, None
-        return None, args, kwargs
 
     def get_condition_input(self, condition_embedder, input_dict, input_mapping):
         condition_args = self.map_input_keys(input_dict, input_mapping)
