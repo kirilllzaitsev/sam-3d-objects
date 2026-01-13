@@ -930,7 +930,7 @@ class InferencePipeline(nn.Module):
             raise NotImplementedError
 
 
-class EncoderInferencePipeline(InferencePipeline):
+class SparseInferencePipeline(InferencePipeline):
     def __init__(
         self,
         *args,
@@ -962,6 +962,13 @@ class EncoderInferencePipeline(InferencePipeline):
                 fullgraph=True,  # _preprocess_input in dino is not compatible with fullgraph
             )
         )
+        self.models["ss_generator"].reverse_fn.inner_forward = clone_output_wrapper(
+            torch.compile(
+                self.models["ss_generator"].reverse_fn.inner_forward,
+                mode=compile_mode,
+                fullgraph=True,
+            )
+        )
 
         self._warmup()
 
@@ -974,78 +981,19 @@ class EncoderInferencePipeline(InferencePipeline):
 
         for _ in tqdm(range(num_warmup_iters)):
             ss_input_dict = self.preprocess_image(image, self.ss_preprocessor)
-            slat_input_dict = self.preprocess_image(image, self.slat_preprocessor)
             ss_return_dict = self.sample_sparse_structure(ss_input_dict)
 
-    def instantiate_and_load_from_pretrained(
-        self,
-        config,
-        ckpt_path,
-        state_dict_fn=None,
-        state_dict_key="state_dict",
-        device="cuda",
-        strict=True,
-    ):
-        model = instantiate(config)
-
-        if ckpt_path.endswith(".safetensors"):
-            state_dict = load_file(ckpt_path, device="cuda")
-            if state_dict_fn is not None:
-                state_dict = state_dict_fn(state_dict)
-            model.load_state_dict(state_dict, strict=False)
-            model.eval()
-        else:
-            model = load_model_from_checkpoint(
-                model,
-                ckpt_path,
-                strict=strict,
-                device="cpu",
-                freeze=True,
-                eval=True,
-                state_dict_key=state_dict_key,
-                state_dict_fn=state_dict_fn,
-            )
-        model = model.to(device)
-
-        return model
-
-    def init_pose_decoder(self, ss_generator_config_path, pose_decoder_name):
-        return None
-
-    def init_ss_preprocessor(self, ss_preprocessor, ss_generator_config_path):
-        if ss_preprocessor is not None:
-            return ss_preprocessor
-        config = OmegaConf.load(
-            os.path.join(self.workspace_dir, ss_generator_config_path)
-        )["tdfy"]["val_preprocessor"]
-        return instantiate(config)
-
-    def init_ss_generator(self, ss_generator_config_path, ss_generator_ckpt_path):
-        return None
-
     def init_slat_generator(self, slat_generator_config_path, slat_generator_ckpt_path):
-        return None
-
-    def init_ss_encoder(self, ss_encoder_config_path, ss_encoder_ckpt_path):
-        return None
-
-    def init_ss_decoder(self, ss_decoder_config_path, ss_decoder_ckpt_path):
         return None
 
     def init_slat_decoder_gs(
         self, slat_decoder_gs_config_path, slat_decoder_gs_ckpt_path
     ):
-        return None
+       return None
 
     def init_slat_decoder_mesh(
         self, slat_decoder_mesh_config_path, slat_decoder_mesh_ckpt_path
     ):
-        return None
-
-    def override_ss_generator_cfg_config(self, *args, **kwargs):
-        return None
-
-    def override_slat_generator_cfg_config(self, *args, **kwargs):
         return None
 
     def init_slat_condition_embedder(
@@ -1056,12 +1004,23 @@ class EncoderInferencePipeline(InferencePipeline):
     ):
         return None
 
+    def override_slat_generator_cfg_config(
+        self,
+        slat_generator,
+        cfg_strength=5,
+        inference_steps=25,
+        rescale_t=3,
+        cfg_interval=[0, 500],
+    ):
+        return None
+
+
     def run(
         self,
         image: Union[None, Image.Image, np.ndarray],
         mask: Union[None, Image.Image, np.ndarray] = None,
         seed=42,
-        stage1_only=False,
+        stage1_only=True,
         with_mesh_postprocess=True,
         with_texture_baking=True,
         use_vertex_color=False,
@@ -1085,7 +1044,6 @@ class EncoderInferencePipeline(InferencePipeline):
         image = self.merge_image_and_mask(image, mask)
         with self.device:
             ss_input_dict = self.preprocess_image(image, self.ss_preprocessor)
-            slat_input_dict = self.preprocess_image(image, self.slat_preprocessor)
             torch.manual_seed(seed)
             ss_return_dict = self.sample_sparse_structure(
                 ss_input_dict,
@@ -1096,14 +1054,73 @@ class EncoderInferencePipeline(InferencePipeline):
             ss_return_dict.update(self.pose_decoder(ss_return_dict))
 
             if "scale" in ss_return_dict:
-                logger.info(f"Rescaling scale by {ss_return_dict['downsample_factor']}")
-                ss_return_dict["scale"] = (
-                    ss_return_dict["scale"] * ss_return_dict["downsample_factor"]
-                )
+                ss_return_dict["scale"] = ss_return_dict["scale"] * ss_return_dict["downsample_factor"]
             if stage1_only:
-                logger.info("Finished!")
                 ss_return_dict["voxel"] = ss_return_dict["coords"][:, 1:] / 64 - 0.5
-                return ss_return_dict
+            return ss_return_dict
+
+    def sample_sparse_structure(
+        self, ss_input_dict: dict, inference_steps=None, use_distillation=False
+    ):
+        ss_generator = self.models["ss_generator"]
+        ss_decoder = self.models["ss_decoder"]
+        if use_distillation:
+            ss_generator.no_shortcut = False
+            ss_generator.reverse_fn.strength = 0
+            ss_generator.reverse_fn.strength_pm = 0
+        else:
+            ss_generator.no_shortcut = True
+            ss_generator.reverse_fn.strength = self.ss_cfg_strength
+            ss_generator.reverse_fn.strength_pm = self.ss_cfg_strength_pm
+
+        prev_inference_steps = ss_generator.inference_steps
+        if inference_steps:
+            ss_generator.inference_steps = inference_steps
+
+        image = ss_input_dict["image"]
+        bs = image.shape[0]
+        logger.info(
+            "Sampling sparse structure: inference_steps={}, strength={}, interval={}, rescale_t={}, cfg_strength_pm={}",
+            ss_generator.inference_steps,
+            ss_generator.reverse_fn.strength,
+            ss_generator.reverse_fn.interval,
+            ss_generator.rescale_t,
+            ss_generator.reverse_fn.strength_pm,
+        )
+
+        with torch.autocast(device_type="cuda", dtype=self.shape_model_dtype):
+            if self.is_mm_dit():
+                latent_shape_dict = {
+                    k: (bs,) + (v.pos_emb.shape[0], v.input_layer.in_features)
+                    for k, v in ss_generator.reverse_fn.backbone.latent_mapping.items()
+                }
+            else:
+                latent_shape_dict = (bs,) + (4096, 8)
+
+            condition_args, condition_kwargs = self.get_condition_input(
+                self.condition_embedders["ss_condition_embedder"],
+                ss_input_dict,
+                self.ss_condition_input_mapping,
+            )
+            return_dict = ss_generator(
+                latent_shape_dict,
+                image.device,
+                *condition_args,
+                **condition_kwargs,
+            )
+            if not self.is_mm_dit():
+                return_dict = {"shape": return_dict}
+
+            shape_latent = return_dict["shape"]
+            ss = ss_decoder(
+                shape_latent.permute(0, 2, 1)
+                .contiguous()
+                .view(shape_latent.shape[0], 8, 16, 16, 16)
+            )
+            return_dict['ss'] = ss
+
+        ss_generator.inference_steps = prev_inference_steps
+        return return_dict
 
 class EncoderInferencePipeline(InferencePipeline):
     def __init__(
