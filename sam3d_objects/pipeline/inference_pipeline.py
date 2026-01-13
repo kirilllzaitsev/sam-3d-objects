@@ -1105,95 +1105,110 @@ class EncoderInferencePipeline(InferencePipeline):
                 ss_return_dict["voxel"] = ss_return_dict["coords"][:, 1:] / 64 - 0.5
                 return ss_return_dict
 
-            coords = ss_return_dict["coords"]
-            slat = self.sample_slat(
-                slat_input_dict,
-                coords,
-                inference_steps=stage2_inference_steps,
-                use_distillation=use_stage2_distillation,
-            )
-            outputs = self.decode_slat(
-                slat, self.decode_formats if decode_formats is None else decode_formats
-            )
-            outputs = self.postprocess_slat_output(
-                outputs, with_mesh_postprocess, with_texture_baking, use_vertex_color
-            )
-            logger.info("Finished!")
+class EncoderInferencePipeline(InferencePipeline):
+    def __init__(
+        self,
+        *args,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
 
-            return {
-                **ss_return_dict,
-                **outputs,
-            }
+    def _compile(self):
+        torch._dynamo.config.cache_size_limit = 64
+        torch._dynamo.config.accumulated_cache_size_limit = 2048
+        torch._dynamo.config.capture_scalar_outputs = True
+        compile_mode = "max-autotune"
+        logger.info(f"Compile mode {compile_mode}")
 
-    def get_condition_input(self, condition_embedder, input_dict, input_mapping):
-        condition_args = self.map_input_keys(input_dict, input_mapping)
-        condition_kwargs = {
-            k: v for k, v in input_dict.items() if k not in input_mapping
-        }
-        embedded_cond, condition_args, condition_kwargs = self.embed_condition(
-            condition_embedder, *condition_args, **condition_kwargs
+        def clone_output_wrapper(f):
+            @wraps(f)
+            def wrapped(*args, **kwargs):
+                outputs = f(*args, **kwargs)
+                return tree_map_only(
+                    torch.Tensor, lambda t: t.clone() if t.is_cuda else t, outputs
+                )
+
+            return wrapped
+
+        self.embed_condition = clone_output_wrapper(
+            torch.compile(
+                self.embed_condition,
+                mode=compile_mode,
+                fullgraph=True,  # _preprocess_input in dino is not compatible with fullgraph
+            )
         )
-        if embedded_cond is not None:
-            condition_args = (embedded_cond,)
-            condition_kwargs = {}
 
-        return condition_args, condition_kwargs
+        self._warmup()
+
+    def _warmup(self, num_warmup_iters=3):
+        test_image = np.ones((512, 512, 4), dtype=np.uint8) * 255
+        test_image[:, :, :3] = np.random.randint(0, 255, (512, 512, 3), dtype=np.uint8)
+        image = Image.fromarray(test_image)
+        mask = None
+        image = self.merge_image_and_mask(image, mask)
+
+        for _ in tqdm(range(num_warmup_iters)):
+            ss_input_dict = self.preprocess_image(image, self.ss_preprocessor)
+            ss_return_dict = self.sample_sparse_structure(ss_input_dict)
+
+    def init_pose_decoder(self, ss_generator_config_path, pose_decoder_name):
+        return None
+
+    def init_ss_preprocessor(self, ss_preprocessor, ss_generator_config_path):
+        if ss_preprocessor is not None:
+            return ss_preprocessor
+        config = OmegaConf.load(
+            os.path.join(self.workspace_dir, ss_generator_config_path)
+        )["tdfy"]["val_preprocessor"]
+        return instantiate(config)
+
+    def init_ss_generator(self, ss_generator_config_path, ss_generator_ckpt_path):
+        return None
+
+    def init_slat_generator(self, slat_generator_config_path, slat_generator_ckpt_path):
+        return None
+
+    def init_ss_encoder(self, ss_encoder_config_path, ss_encoder_ckpt_path):
+        return None
+
+    def init_ss_decoder(self, ss_decoder_config_path, ss_decoder_ckpt_path):
+        return None
+
+    def init_slat_decoder_gs(
+        self, slat_decoder_gs_config_path, slat_decoder_gs_ckpt_path
+    ):
+        return None
+
+    def init_slat_decoder_mesh(
+        self, slat_decoder_mesh_config_path, slat_decoder_mesh_ckpt_path
+    ):
+        return None
+
+    def override_ss_generator_cfg_config(self, *args, **kwargs):
+        return None
+
+    def override_slat_generator_cfg_config(self, *args, **kwargs):
+        return None
+
+    def init_slat_condition_embedder(
+        self,
+        slat_generator_config_path,
+        slat_generator_ckpt_path,
+        slat_generator_cond_embedder_ckpt_path=None,
+    ):
+        return None
 
     def sample_sparse_structure(
         self, ss_input_dict: dict, inference_steps=None, use_distillation=False
     ):
 
-        image = ss_input_dict["image"]
-        bs = image.shape[0]
-
-        # ss_generator = self.models["ss_generator"]
-        # if use_distillation:
-        #     ss_generator.no_shortcut = False
-        #     ss_generator.reverse_fn.strength = 0
-        #     ss_generator.reverse_fn.strength_pm = 0
-        # else:
-        #     ss_generator.no_shortcut = True
-        #     ss_generator.reverse_fn.strength = self.ss_cfg_strength
-        #     ss_generator.reverse_fn.strength_pm = self.ss_cfg_strength_pm
-
-        # prev_inference_steps = ss_generator.inference_steps
-        # if inference_steps:
-        #     ss_generator.inference_steps = inference_steps
-
-        # image = ss_input_dict["image"]
-        # bs = image.shape[0]
-        # logger.info(
-        #     "Sampling sparse structure: inference_steps={}, strength={}, interval={}, rescale_t={}, cfg_strength_pm={}",
-        #     ss_generator.inference_steps,
-        #     ss_generator.reverse_fn.strength,
-        #     ss_generator.reverse_fn.interval,
-        #     ss_generator.rescale_t,
-        #     ss_generator.reverse_fn.strength_pm,
-        # )
-
         with torch.autocast(device_type="cuda", dtype=self.shape_model_dtype):
-            # if self.is_mm_dit():
-            #     latent_shape_dict = {
-            #         k: (bs,) + (v.pos_emb.shape[0], v.input_layer.in_features)
-            #         for k, v in ss_generator.reverse_fn.backbone.latent_mapping.items()
-            #     }
-            # else:
-            #     latent_shape_dict = (bs,) + (4096, 8)
             condition_args, condition_kwargs = self.get_condition_input(
                 self.condition_embedders["ss_condition_embedder"],
                 ss_input_dict,
                 self.ss_condition_input_mapping,
             )
-            # return_dict = ss_generator(
-            #     latent_shape_dict,
-            #     image.device,
-            #     *condition_args,
-            #     **condition_kwargs,
-            # )
-
-        # ss_generator.inference_steps = prev_inference_steps
         return {
             "condition_args": condition_args,
             "condition_kwargs": condition_kwargs,
-            # "return_dict": return_dict,
         }
