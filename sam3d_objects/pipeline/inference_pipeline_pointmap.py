@@ -18,6 +18,7 @@ from sam3d_objects.model.backbone.dit.embedder.pointmap import PointPatchEmbed
 from sam3d_objects.pipeline.inference_pipeline import (
     EncoderInferencePipeline,
     InferencePipeline,
+    SparseInferencePipeline
 )
 from sam3d_objects.pipeline.inference_utils import (
     estimate_plane_area,
@@ -264,7 +265,7 @@ class InferencePipelinePointMap(InferencePipeline):
 
     def compute_pointmap(self, image, pointmap=None):
         loaded_image = self.image_to_float(image)
-        loaded_image = torch.from_numpy(loaded_image)
+        loaded_image = loaded_image if torch.is_tensor(loaded_image) else torch.from_numpy(loaded_image)
         loaded_mask = loaded_image[..., -1]
         loaded_image = loaded_image.permute(2, 0, 1).contiguous()[:3]
 
@@ -513,6 +514,79 @@ class InferencePipelinePointMap(InferencePipeline):
             decode_formats=decode_formats,
             event_image=event_image,
         )
+
+
+class SparseInferencePipelinePointMap(SparseInferencePipeline, InferencePipelinePointMap):
+    
+    def run(
+        self,
+        image: Union[None, Image.Image, np.ndarray],
+        mask: Union[None, Image.Image, np.ndarray] = None,
+        seed: Optional[int] = None,
+        stage1_only=False,
+        with_mesh_postprocess=True,
+        with_texture_baking=True,
+        with_layout_postprocess=True,
+        use_vertex_color=False,
+        stage1_inference_steps=None,
+        stage2_inference_steps=None,
+        use_stage1_distillation=False,
+        use_stage2_distillation=False,
+        pointmap=None,
+        event_image=None,
+        decode_formats=None,
+        estimate_plane=False,
+    ) -> dict:
+        image = self.merge_image_and_mask(image, mask)
+        with self.device: 
+            if image.ndim == 4:
+                ss_input_dict = defaultdict(list)
+                for bidx in range(len(image)):
+                    pointmap_ = None
+                    pointmap_dict = self.compute_pointmap(image[bidx], pointmap)
+                    pointmap_ = pointmap_dict["pointmap"]
+                    # pts = _down_sample_img(pointmap_)
+                    # pts_colors = _down_sample_img(pointmap_dict["pts_color"])
+                    ss_input_dict_ = preprocess_image(
+                        self, image[bidx], self.ss_preprocessor, pointmap=pointmap_, event_image=None if event_image is None else event_image[bidx]
+                    )
+                    for k,v in ss_input_dict_.items():
+                        ss_input_dict[k].append(v)
+                ss_input_dict = {k: v if v[0] is None else torch.cat(v, dim=0) for k,v in ss_input_dict.items()}
+            else:
+                pointmap_dict = self.compute_pointmap(image, pointmap)
+                pointmap = pointmap_dict["pointmap"]
+                # pointmap = None
+                ss_input_dict = preprocess_image(
+                    self, image, self.ss_preprocessor, pointmap=pointmap, event_image=event_image
+                )
+
+            if estimate_plane:
+                return self.estimate_plane(pointmap_dict, image)
+
+            if seed is not None:
+                torch.manual_seed(seed)
+            ss_return_dict = self.sample_sparse_structure(
+                ss_input_dict,
+                inference_steps=stage1_inference_steps,
+                use_distillation=use_stage1_distillation,
+            )
+
+            # We could probably use the decoder from the models themselves
+            pointmap_scale = ss_input_dict.get("pointmap_scale", None)
+            pointmap_shift = ss_input_dict.get("pointmap_shift", None)
+            ss_return_dict.update(
+                self.pose_decoder(
+                    ss_return_dict,
+                    scene_scale=pointmap_scale,
+                    scene_shift=pointmap_shift,
+                )
+            )
+
+            # ss_return_dict["scale"] = ss_return_dict["scale"] * ss_return_dict["downsample_factor"]
+
+            # ss_return_dict["voxel"] = ss_return_dict["coords"][:, 1:] / 64 - 0.5
+            return ss_return_dict
 
 
 class EncoderInferencePipelinePointMap(EncoderInferencePipeline):
