@@ -579,10 +579,10 @@ class InferencePipeline(nn.Module):
             ss_return_dict.update(self.pose_decoder(ss_return_dict))
 
             if "scale" in ss_return_dict:
-                logger.info(f"Rescaling scale by {ss_return_dict['downsample_factor']}")
+                logger.debug(f"Rescaling scale by {ss_return_dict['downsample_factor']}")
                 ss_return_dict["scale"] = ss_return_dict["scale"] * ss_return_dict["downsample_factor"]
             if stage1_only:
-                logger.info("Finished!")
+                logger.debug("Finished!")
                 ss_return_dict["voxel"] = ss_return_dict["coords"][:, 1:] / 64 - 0.5
                 return ss_return_dict
 
@@ -599,7 +599,7 @@ class InferencePipeline(nn.Module):
             outputs = self.postprocess_slat_output(
                 outputs, with_mesh_postprocess, with_texture_baking, use_vertex_color
             )
-            logger.info("Finished!")
+            logger.debug("Finished!")
 
             return {
                 **ss_return_dict,
@@ -610,7 +610,7 @@ class InferencePipeline(nn.Module):
         self, outputs, with_mesh_postprocess, with_texture_baking, use_vertex_color
     ):
         # GLB files can be extracted from the outputs
-        logger.info(
+        logger.debug(
             f"Postprocessing mesh with option with_mesh_postprocess {with_mesh_postprocess}, with_texture_baking {with_texture_baking}..."
         )
         if "mesh" in outputs:
@@ -684,7 +684,7 @@ class InferencePipeline(nn.Module):
         Returns:
             dict: The decoded structured latent.
         """
-        logger.info("Decoding sparse latent...")
+        logger.debug("Decoding sparse latent...")
         ret = {}
         with torch.no_grad():
             if "mesh" in formats:
@@ -712,11 +712,11 @@ class InferencePipeline(nn.Module):
         condition_kwargs = {
             k: v for k, v in input_dict.items() if k not in input_mapping
         }
-        logger.info("Running condition embedder ...")
+        logger.debug("Running condition embedder ...")
         embedded_cond, condition_args, condition_kwargs = self.embed_condition(
             condition_embedder, *condition_args, **condition_kwargs
         )
-        logger.info("Condition embedder finishes!")
+        logger.debug("Condition embedder finishes!")
         if embedded_cond is not None:
             condition_args = (embedded_cond,)
             condition_kwargs = {}
@@ -743,7 +743,7 @@ class InferencePipeline(nn.Module):
 
         image = ss_input_dict["image"]
         bs = image.shape[0]
-        logger.info(
+        logger.debug(
             "Sampling sparse structure: inference_steps={}, strength={}, interval={}, rescale_t={}, cfg_strength_pm={}",
             ss_generator.inference_steps,
             ss_generator.reverse_fn.strength,
@@ -793,7 +793,7 @@ class InferencePipeline(nn.Module):
                         max_neighbor_axes_dist=self.downsample_ss_dist,
                     )
                 coords, downsample_factor = downsample_sparse_structure(coords)
-                logger.info(
+                logger.debug(
                     f"Downsampled coords from {original_shape[0]} to {coords.shape[0]}"
                 )
                 return_dict["coords"] = coords
@@ -823,7 +823,7 @@ class InferencePipeline(nn.Module):
             slat_generator.no_shortcut = True
             slat_generator.reverse_fn.strength = self.slat_cfg_strength
 
-        logger.info(
+        logger.debug(
             "Sampling sparse latent: inference_steps={}, strength={}, interval={}, rescale_t={}",
             slat_generator.inference_steps,
             slat_generator.reverse_fn.strength,
@@ -1079,7 +1079,7 @@ class SparseInferencePipeline(InferencePipeline):
 
         image = ss_input_dict["image"]
         bs = image.shape[0]
-        logger.info(
+        logger.debug(
             "Sampling sparse structure: inference_steps={}, strength={}, interval={}, rescale_t={}, cfg_strength_pm={}",
             ss_generator.inference_steps,
             ss_generator.reverse_fn.strength,
