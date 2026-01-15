@@ -93,9 +93,13 @@ class Inference:
         ss_generator_cond_embedder_ckpt_path=None,
         slat_generator_cond_embedder_ckpt_path=None,
         rgbe_fuser_ckpt_path=None,
+        use_only_sparse=False,
     ):
+        self.use_only_sparse = use_only_sparse
         # load inference pipeline
         config = OmegaConf.load(config_file)
+        if use_only_sparse:
+            config._target_ = "sam3d_objects.pipeline.inference_pipeline_pointmap.SparseInferencePipelinePointMap"
         config.rendering_engine = "pytorch3d"  # overwrite to disable nvdiffrast
         config.compile_model = compile
         config.workspace_dir = os.path.dirname(config_file)
@@ -131,7 +135,7 @@ class Inference:
             image,
             None,
             seed,
-            stage1_only=False,
+            stage1_only=self.use_only_sparse,
             with_mesh_postprocess=False,
             with_texture_baking=False,
             with_layout_postprocess=True,
