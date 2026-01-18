@@ -499,6 +499,10 @@ class InferencePipelinePointMap(InferencePipeline):
         pointmap=None,
         event_image=None,
         decode_formats=['gaussian'],
+        use_stage1_distillation=True,
+        stage1_inference_steps=4,
+        use_stage2_distillation=True,
+        stage2_inference_steps=4
     ):
         return self.run(
             image=image,
@@ -509,10 +513,13 @@ class InferencePipelinePointMap(InferencePipeline):
             with_texture_baking=False,
             with_layout_postprocess=True,
             use_vertex_color=True,
-            stage1_inference_steps=None,
             pointmap=pointmap,
             decode_formats=decode_formats,
             event_image=event_image,
+            stage1_inference_steps=stage1_inference_steps,
+            use_stage1_distillation=use_stage1_distillation,
+            stage2_inference_steps=stage2_inference_steps,
+            use_stage2_distillation=use_stage2_distillation,
         )
 
 
