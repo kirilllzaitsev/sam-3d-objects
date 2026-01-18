@@ -769,7 +769,11 @@ class PoseTargetConverter:
         normalize = kwargs.pop("normalize", False)
         pose_target = PoseTarget(**kwargs)
         instance_pose = PoseTargetConverter.pose_target_to_instance_pose(pose_target, normalize)
-        return asdict(instance_pose)
+        return {
+            "instance_position_l2c": instance_pose.instance_position_l2c,
+            "instance_quaternion_l2c": instance_pose.instance_quaternion_l2c,
+            "instance_scale_l2c": instance_pose.instance_scale_l2c,
+        }
 
 
 class LogScaleShiftNormalizer:
