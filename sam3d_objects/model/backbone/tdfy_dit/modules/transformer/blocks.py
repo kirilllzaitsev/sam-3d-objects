@@ -195,3 +195,63 @@ class TransformerCrossBlock(nn.Module):
             )
         else:
             return self._forward(x, context)
+
+
+
+class TransformerCrossBlockFlamingo(nn.Module):
+    """
+    Transformer cross-attention block as in Flamingo
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        ctx_channels: int,
+        num_heads: int,
+        mlp_ratio: float = 4.0,
+        attn_mode: Literal["full", "windowed"] = "full",
+        window_size: Optional[int] = None,
+        shift_window: Optional[Tuple[int, int, int]] = None,
+        use_checkpoint: bool = False,
+        use_rope: bool = False,
+        qk_rms_norm: bool = False,
+        qk_rms_norm_cross: bool = False,
+        qkv_bias: bool = True,
+        ln_affine: bool = False,
+    ):
+        super().__init__()
+        self.use_checkpoint = use_checkpoint
+        self.norm1 = LayerNorm32(channels, elementwise_affine=ln_affine, eps=1e-6)
+        self.norm3 = LayerNorm32(channels, elementwise_affine=ln_affine, eps=1e-6)
+        self.cross_attn = MultiHeadAttention(
+            channels,
+            ctx_channels=ctx_channels,
+            num_heads=num_heads,
+            type="cross",
+            attn_mode="full",
+            qkv_bias=qkv_bias,
+            qk_rms_norm=qk_rms_norm_cross,
+        )
+        self.mlp = FeedForwardNet(
+            channels,
+            mlp_ratio=mlp_ratio,
+        )
+        self.alpha_xattn = nn.Parameter(torch.zeros(1))
+        self.alpha_dense = nn.Parameter(torch.zeros(1))
+
+    def _forward(self, x: torch.Tensor, context: torch.Tensor):
+        h = self.norm1(x)
+        h = self.cross_attn(h, context)
+        x = x + self.alpha_xattn * h
+        h = self.norm3(x)
+        h = self.mlp(h)
+        x = x + self.alpha_dense * h
+        return x
+
+    def forward(self, x: torch.Tensor, context: torch.Tensor):
+        if self.use_checkpoint:
+            return torch.utils.checkpoint.checkpoint(
+                self._forward, x, context, use_reentrant=False
+            )
+        else:
+            return self._forward(x, context)
