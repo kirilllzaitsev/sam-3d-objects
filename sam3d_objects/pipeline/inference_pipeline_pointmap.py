@@ -664,6 +664,7 @@ class EncoderInferencePipelinePointMap(EncoderInferencePipeline):
         pointmap=None,
         event_image=None,
         decode_formats=['gaussian'],
+        **kwargs,
     ):
         return self.run(
             image=image,

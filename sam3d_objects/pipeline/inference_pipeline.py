@@ -101,12 +101,14 @@ class InferencePipeline(nn.Module):
         use_event=False,
         rgbe_fusion_type="gated",
         use_ckpt=True,
+        use_cattn_with_events=False,
     ):
         super().__init__()
         self.rendering_engine = rendering_engine
         self.device = torch.device(device)
         self.compile_model = compile_model
         self.use_event = use_event
+        self.use_cattn_with_events = use_cattn_with_events
         self.use_ckpt = use_ckpt
         self.rgbe_fusion_type = rgbe_fusion_type
         self.ss_generator_cond_embedder_ckpt_path = ss_generator_cond_embedder_ckpt_path
@@ -334,6 +336,8 @@ class InferencePipeline(nn.Module):
             os.path.join(self.workspace_dir, ss_generator_config_path)
         )["module"]["generator"]["backbone"]
 
+        config.reverse_fn.backbone.use_cattn_with_events = self.use_cattn_with_events
+
         state_dict_prefix_func = filter_and_remove_prefix_state_dict_fn(
             "_base_models.generator."
         )
@@ -343,6 +347,7 @@ class InferencePipeline(nn.Module):
             os.path.join(self.workspace_dir, ss_generator_ckpt_path),
             state_dict_fn=state_dict_prefix_func,
             device=self.device,
+            strict=not self.use_cattn_with_events
         )
 
     def init_slat_generator(self, slat_generator_config_path, slat_generator_ckpt_path):
@@ -425,6 +430,7 @@ class InferencePipeline(nn.Module):
         rgbe_fuser_ckpt_path=None,
         use_event=False
     ):
+        use_event_fusion = use_event and not self.use_cattn_with_events
         conf = OmegaConf.load(
             os.path.join(self.workspace_dir, ss_generator_config_path)
         )
@@ -432,6 +438,7 @@ class InferencePipeline(nn.Module):
             "backbone"
         ].rgbe_fusion_type = self.rgbe_fusion_type
         conf["module"]["condition_embedder"]["backbone"].use_event = use_event
+        conf["module"]["condition_embedder"]["backbone"].use_event_fusion = use_event_fusion
         if "condition_embedder" in conf["module"]:
             state_dict_fn = filter_and_remove_prefix_state_dict_fn(
                 "_base_models.condition_embedder."
@@ -463,7 +470,7 @@ class InferencePipeline(nn.Module):
                     eval=True,
                     state_dict_fn=None,
                 )
-            if rgbe_fuser_ckpt_path is not None:
+            if rgbe_fuser_ckpt_path is not None and use_event_fusion:
                 model.rgbe_fuser = load_model_from_checkpoint(
                     model.rgbe_fuser,
                     rgbe_fuser_ckpt_path,
