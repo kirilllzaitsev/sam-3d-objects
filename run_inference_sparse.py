@@ -34,7 +34,7 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 from tqdm.auto import tqdm
 
-from event_sam3d.config import MVSEC_DIR, MVSEC_SCENES, REPLICA_DIR, REPLICA_SCENES, SAM3_DIR
+from event_sam3d.config import MVSEC_DIR, MVSEC_SCENES, REPLICA_DIR, REPLICA_SCENES, RGBE_DIR, SAM3_DIR
 from event_sam3d.nb_utils_static import get_ds
 
 sam3_root = os.path.join(os.path.dirname(sam3.__file__), "..")
@@ -58,15 +58,42 @@ parser.add_argument("--part2", type=int, default=0)
 parser.add_argument(
     "--stage", required=False, choices=["train", "test-normal"], default="train"
 )
+parser.add_argument(
+    "--test_subsplit", required=False, choices=["easy", "medium", "hard"], default="easy"
+)
 args, _ = parser.parse_known_args()
 print(f"{args=}")
 
 
 ds_name = args.ds_name
+is_mvsec = ds_name == "mvsec"
 is_rgbe = ds_name == "rgbe"
 is_ereplica = ds_name == "ereplica"
 
 if is_rgbe:
+    stage = args.stage
+    dirs = get_ordered_paths(f"{DATA_DIR}/eventsam/RGBE-SEG/{stage}/*")
+    prompts = [
+        "person",
+        "car",
+        # "object",
+        # "animal",
+        # "device",
+        # "drone",
+        # infrequent
+        # "hydrant",
+        # "lamp",
+        # "book",
+        # "tv",
+    ]
+    assert args.part1 in [0, 1, 2, 3]
+    assert args.part2 in [0, 1]
+    obj_names = prompts[args.part2 : args.part2 + 1]
+    dirs = [Path(x).name for x in get_ordered_paths(f"{DATA_DIR}/eventsam/RGBE-SEG/{stage}/*") if Path(x).is_dir()]
+    dirs = [x for x in dirs if x not in ['sam3d']]
+    filenames = np.array_split(dirs, 4)[args.part1]
+    print(f"Running part {args.part1}/{4}, {len(filenames)} dirs")
+elif is_mvsec:
     assert args.part1 in [0, 1, 2, 3]
     assert args.part2 in [0, 1]
     obj_names = ["barrel", "rug"][args.part2 : args.part2 + 1]
@@ -106,6 +133,7 @@ inference = Inference(
     # rgbe_fusion_type=args.rgbe_fusion_type,
     device=device,
     use_ckpt=True,
+    use_only_sparse=True,
     # ss_generator_cond_embedder_ckpt_path=f"{ckpt_dir}/best_ss_generator_cond_embedder.pt",
     # rgbe_fuser_ckpt_path=f"{ckpt_dir}/best_rgbe_fuser.pt",
 )
@@ -119,8 +147,10 @@ for filename in filenames:
             obj_name=obj_name,
             filename=filename,
             split=args.stage,
-            subsplit=None,
+            subsplit=args.test_subsplit,
         )
+        if len(ds) == 0:
+            continue
         for idx in (
             tqdm(
                 range(len(ds)),
@@ -129,17 +159,22 @@ for filename in filenames:
             )
         ):
             sample = ds[idx]
-            with torch.no_grad():
-
-                output = inference._pipeline(
-                    sample["rgb"], (sample["mask"] * 255).astype(np.uint8), seed=42
-                )
-
-            ds_dir=MVSEC_DIR if ds_name == "mvsec" else REPLICA_DIR
+            ds_dir=MVSEC_DIR if ds_name == "mvsec" else (REPLICA_DIR if is_ereplica else f"{DATA_DIR}/eventsam/RGBE-SEG/{args.stage}")
             save_dir = f"{ds_dir}/{filename}/sam3d_sparse"
             os.makedirs(save_dir, exist_ok=True)
             frame_name = sample["frame_name"]
             save_path = f"{save_dir}/{obj_name}_{frame_name}.pt"
+            if os.path.exists(save_path):
+                continue
+            with torch.no_grad():
+                output = inference._pipeline(
+                    sample["rgb"], (sample["mask"] * 255).astype(np.uint8), seed=42,
+                    use_stage1_distillation=True,
+                    stage1_inference_steps=4,
+                    use_stage2_distillation=True,
+                    stage2_inference_steps=4
+                )
+
             save_sam3d_sparse_pred(save_path, output)
 
     #         print(save_path)
