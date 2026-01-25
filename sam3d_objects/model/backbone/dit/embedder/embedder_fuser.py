@@ -37,6 +37,7 @@ class EmbedderFuser(torch.nn.Module):
         force_drop_modalities: List[str] = None,
         rgbe_fusion_type = "gated",
         use_event = False,
+        use_event_fusion = False,
     ):
         super().__init__()
         # torch.compile does not support OmegaConf.ListConfig, so we convert to a list
@@ -48,6 +49,7 @@ class EmbedderFuser(torch.nn.Module):
         self.embed_dims = 0
         self.rgbe_fusion_type = rgbe_fusion_type
         self.use_event = use_event
+        self.use_fusion = use_event_fusion
         self.compression_projection_multiplier = compression_projection_multiplier
         self.concate_embed_dims = 0
         # keep moduleList to be compatible with nn module
@@ -107,7 +109,7 @@ class EmbedderFuser(torch.nn.Module):
             self.requires_grad_(False)
             self.eval()
 
-        if use_event:
+        if use_event_fusion:
             if rgbe_fusion_type=="gated":
                 self.rgbe_fuser = GatedProjectionFusion(nmods=3, dim=1024)
             else:
@@ -247,7 +249,7 @@ class EmbedderFuser(torch.nn.Module):
                 if kwarg_name in ['image', 'rgb_image', 'rgb_event_image', 'event_image']:
                     fusion_idxs[kwarg_name]=(len(tokens)-1)
 
-        if self.use_event:
+        if self.use_event_fusion:
             tokens[fusion_idxs['rgb_image']] = self.rgbe_fuser(
                 target=tokens[fusion_idxs['rgb_image']], 
                 src=tokens[fusion_idxs['rgb_event_image']]
@@ -258,6 +260,9 @@ class EmbedderFuser(torch.nn.Module):
             )
             tokens = [t for i, t in enumerate(tokens) if i not in [fusion_idxs['event_image'], fusion_idxs['rgb_event_image']]]
             kwarg_names = [k for i, k in enumerate(kwarg_names) if i not in [fusion_idxs['event_image'], fusion_idxs['rgb_event_image']]]
+        elif self.use_event:
+            # events will be concat last by default
+            pass
 
         # Apply dropout modalities with preserved order
         tokens = self._dropout_modalities(kwarg_names, tokens)
