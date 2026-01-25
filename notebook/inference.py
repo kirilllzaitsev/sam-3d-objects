@@ -94,12 +94,14 @@ class Inference:
         slat_generator_cond_embedder_ckpt_path=None,
         rgbe_fuser_ckpt_path=None,
         use_only_sparse=False,
+        use_cattn_with_events=False,
     ):
         self.use_only_sparse = use_only_sparse
         # load inference pipeline
         config = OmegaConf.load(config_file)
         if use_only_sparse:
             config._target_ = "sam3d_objects.pipeline.inference_pipeline_pointmap.SparseInferencePipelinePointMap"
+        config.use_cattn_with_events = use_cattn_with_events
         config.rendering_engine = "pytorch3d"  # overwrite to disable nvdiffrast
         config.compile_model = compile
         config.workspace_dir = os.path.dirname(config_file)

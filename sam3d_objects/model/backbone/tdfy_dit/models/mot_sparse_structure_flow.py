@@ -8,7 +8,7 @@ from ..modules.utils import convert_module_to_f16, convert_module_to_f32
 from collections import namedtuple
 from ..modules.utils import FP16_TYPE
 from ..modules.transformer import (
-    MOTModulatedTransformerCrossBlock,
+    MOTModulatedTransformerCrossBlock, TransformerCrossBlockFlamingo
 )
 from sam3d_objects.data.utils import (
     tree_reduce_unique,
@@ -35,6 +35,7 @@ class SparseStructureFlowModel(nn.Module):
         qk_rms_norm_cross: bool = False,
         freeze_shared_parameters: bool = False,
         is_shortcut_model: bool = False,
+        use_cattn_with_events=False,
         *args,
         **kwargs,
     ):
@@ -49,6 +50,7 @@ class SparseStructureFlowModel(nn.Module):
         self.pe_mode = pe_mode
         self.use_fp16 = use_fp16
         self.use_checkpoint = use_checkpoint
+        self.use_cattn_with_events = use_cattn_with_events
         self.share_mod = share_mod
         self.qk_rms_norm = qk_rms_norm
         self.qk_rms_norm_cross = qk_rms_norm_cross
@@ -82,6 +84,26 @@ class SparseStructureFlowModel(nn.Module):
                 for _ in range(num_blocks)
             ]
         )
+
+        if use_cattn_with_events:
+            cattn_block_idxs = [2, 5, 8, 11, 14, 17, 20, 23]
+            cattn_block_idxs = [0, 2, 4, 6]
+            self.rgbe_fuser = nn.ModuleDict(
+                {
+                    str(i): TransformerCrossBlockFlamingo(
+                        model_channels,
+                        cond_channels,
+                        num_heads=self.num_heads,
+                        mlp_ratio=self.mlp_ratio,
+                        attn_mode="full",
+                        use_checkpoint=self.use_checkpoint,
+                        use_rope=(pe_mode == "rope"),
+                        qk_rms_norm=self.qk_rms_norm,
+                        qk_rms_norm_cross=self.qk_rms_norm_cross,
+                    )
+                    for i in cattn_block_idxs
+                }
+            )
 
         self.initialize_weights()
         if use_fp16:
@@ -159,7 +181,17 @@ class SparseStructureFlowModel(nn.Module):
         )
         cond = cond.type(self.dtype)
 
-        for block in self.blocks:
+        if self.use_cattn_with_events:
+            # full/crop imgs at 518 + pointmap at 256
+            assert cond.shape[1]==1370*6+1024*2, cond.shape
+            num_event_tokens=1370*2
+            cond, event_tokens = cond[:, :-num_event_tokens], cond[:, -num_event_tokens:]
+
+        for i, block in enumerate(self.blocks):
+            if self.use_cattn_with_events and str(i) in self.rgbe_fuser.keys():
+                # 1. Gated Cross Attention y = y + tanh(alpha_xattn) * attention(q=y, kv=x) # 2. Gated Feed Forward (dense) Layer y = y + tanh(alpha_dense) * ffw(y)
+                cond = self.rgbe_fuser[str(i)](cond, event_tokens)
+
             h = block(h, t_emb, cond)
 
         h = _pytree.tree_map(
