@@ -318,10 +318,11 @@ def pose_decoder(
             x_scene_scale=pose_target_dict["x_scene_scale"],
             x_scene_center=pose_target_dict["x_scene_center"],
         )
+        scale = pose_instance_dict["instance_scale_l2c"].squeeze(1).mean(-1, keepdim=True).expand(-1,3)
         return {
             "translation": pose_instance_dict["instance_position_l2c"].squeeze(0),
             "rotation": pose_instance_dict["instance_quaternion_l2c"].squeeze(0),
-            "scale": pose_instance_dict["instance_scale_l2c"].squeeze(0).mean(-1, keepdim=True).expand(1,3),
+            "scale": scale,
         }
 
     return decode
