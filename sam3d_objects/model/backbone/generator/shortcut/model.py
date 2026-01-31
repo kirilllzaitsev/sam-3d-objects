@@ -297,7 +297,7 @@ class ShortCut(FlowMatching):
         
         return t, d
 
-    def loss(self, x1: torch.Tensor, *args_conditionals, **kwargs_conditionals):
+    def loss(self, x1: torch.Tensor, *args_conditionals, use_sc=True, **kwargs_conditionals):
         """Compute shortcut model loss with mixed flow matching and self-consistency objectives"""
         # t, d = self._generate_t_and_d(x1)
         t = self._generate_t(x1)
@@ -308,6 +308,9 @@ class ShortCut(FlowMatching):
         # Determine which samples use flow matching vs  self-consistency
         flow_matching_indices = (d == 0).nonzero(as_tuple=False).squeeze(-1)  # 75% of the time use d=0 (flow matching), 25% use self-consistency
         self_consistency_indices = (d > 0).nonzero(as_tuple=False).squeeze(-1)
+        if not use_sc:
+            flow_matching_indices = torch.arange(x1.shape[0], device=x1.device)
+            self_consistency_indices = torch.tensor([], device=x1.device)
         d[d == 0] = torch.rand_like(d[d == 0]) * self.fm_eps_max
         
         # Clear autocast cache for gradient computation

@@ -49,7 +49,7 @@ class EmbedderFuser(torch.nn.Module):
         self.embed_dims = 0
         self.rgbe_fusion_type = rgbe_fusion_type
         self.use_event = use_event
-        self.use_fusion = use_event_fusion
+        self.use_event_fusion = use_event_fusion
         self.compression_projection_multiplier = compression_projection_multiplier
         self.concate_embed_dims = 0
         # keep moduleList to be compatible with nn module
