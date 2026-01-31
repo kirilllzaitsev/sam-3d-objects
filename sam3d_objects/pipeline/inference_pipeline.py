@@ -151,7 +151,7 @@ class InferencePipeline(nn.Module):
             logger.info("Loading model weights...")
 
             ss_generator = self.init_ss_generator(
-                ss_generator_config_path, ss_generator_ckpt_path
+                ss_generator_config_path, ss_generator_ckpt_path, rgbe_fuser_ckpt_path=rgbe_fuser_ckpt_path
             )
             slat_generator = self.init_slat_generator(
                 slat_generator_config_path, slat_generator_ckpt_path
@@ -331,7 +331,7 @@ class InferencePipeline(nn.Module):
         config = OmegaConf.load(os.path.join(self.workspace_dir, ss_generator_config_path))["tdfy"]["val_preprocessor"]
         return instantiate(config)
 
-    def init_ss_generator(self, ss_generator_config_path, ss_generator_ckpt_path):
+    def init_ss_generator(self, ss_generator_config_path, ss_generator_ckpt_path, rgbe_fuser_ckpt_path=None):
         config = OmegaConf.load(
             os.path.join(self.workspace_dir, ss_generator_config_path)
         )["module"]["generator"]["backbone"]
@@ -342,13 +342,26 @@ class InferencePipeline(nn.Module):
             "_base_models.generator."
         )
 
-        return self.instantiate_and_load_from_pretrained(
+        model = self.instantiate_and_load_from_pretrained(
             config,
             os.path.join(self.workspace_dir, ss_generator_ckpt_path),
             state_dict_fn=state_dict_prefix_func,
             device=self.device,
             strict=not self.use_cattn_with_events
         )
+
+        if rgbe_fuser_ckpt_path is not None and self.use_cattn_with_events:
+            model.reverse_fn.backbone.rgbe_fuser = load_model_from_checkpoint(
+                model.reverse_fn.backbone.rgbe_fuser,
+                rgbe_fuser_ckpt_path,
+                strict=True,
+                device=self.device,
+                freeze=True,
+                eval=True,
+                state_dict_fn=None,
+            )
+        return model
+
 
     def init_slat_generator(self, slat_generator_config_path, slat_generator_ckpt_path):
         config = OmegaConf.load(
