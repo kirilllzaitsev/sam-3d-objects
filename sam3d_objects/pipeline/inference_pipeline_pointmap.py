@@ -544,35 +544,15 @@ class SparseInferencePipelinePointMap(SparseInferencePipeline, InferencePipeline
         decode_formats=None,
         estimate_plane=False,
     ) -> dict:
-        image = self.merge_image_and_mask(image, mask)
         with self.device: 
-            if image.ndim == 4:
-                ss_input_dict = defaultdict(list)
-                for bidx in range(len(image)):
-                    pointmap_ = None
-                    pointmap_dict = self.compute_pointmap(image[bidx], pointmap)
-                    pointmap_ = pointmap_dict["pointmap"]
-                    # pts = _down_sample_img(pointmap_)
-                    # pts_colors = _down_sample_img(pointmap_dict["pts_color"])
-                    ss_input_dict_ = preprocess_image(
-                        self, image[bidx], self.ss_preprocessor, pointmap=pointmap_, event_image=None if event_image is None else event_image[bidx]
-                    )
-                    for k,v in ss_input_dict_.items():
-                        ss_input_dict[k].append(v)
-                ss_input_dict = {k: v if v[0] is None else torch.cat(v, dim=0) for k,v in ss_input_dict.items()}
-            else:
-                pointmap_dict = self.compute_pointmap(image, pointmap)
-                pointmap = pointmap_dict["pointmap"]
-                # pointmap = None
-                ss_input_dict = preprocess_image(
-                    self, image, self.ss_preprocessor, pointmap=pointmap, event_image=event_image
-                )
+            inputs = self.prep_input_dict(image, mask, pointmap, event_image)
 
             if estimate_plane:
-                return self.estimate_plane(pointmap_dict, image)
+                return self.estimate_plane(inputs['pointmap_dict'], inputs['image'])
 
             if seed is not None:
                 torch.manual_seed(seed)
+            ss_input_dict = inputs['ss_input_dict']
             ss_return_dict = self.sample_sparse_structure(
                 ss_input_dict,
                 inference_steps=stage1_inference_steps,
@@ -594,6 +574,66 @@ class SparseInferencePipelinePointMap(SparseInferencePipeline, InferencePipeline
 
             # ss_return_dict["voxel"] = ss_return_dict["coords"][:, 1:] / 64 - 0.5
             return ss_return_dict
+
+    def extract_embeds(self,
+        image: Union[None, Image.Image, np.ndarray],
+        mask: Union[None, Image.Image, np.ndarray] = None,
+        seed: Optional[int] = None,
+        stage1_only=False,
+        with_mesh_postprocess=True,
+        with_texture_baking=True,
+        with_layout_postprocess=True,
+        use_vertex_color=False,
+        stage1_inference_steps=None,
+        stage2_inference_steps=None,
+        use_stage1_distillation=False,
+        use_stage2_distillation=False,
+        pointmap=None,
+        event_image=None,
+        decode_formats=None,
+        estimate_plane=False,
+        ):
+            with self.device:
+                inputs = self.prep_input_dict(image, mask, pointmap, event_image)
+                ss_input_dict = inputs['ss_input_dict']
+                ss_return_dict = self.sample_sparse_structure(
+                    ss_input_dict,
+                    inference_steps=stage1_inference_steps,
+                    use_distillation=use_stage1_distillation,
+                    do_only_condition=True,
+                )
+                return ss_return_dict
+
+    def prep_input_dict(self, image, mask, pointmap, event_image):
+        image = self.merge_image_and_mask(image, mask)
+        if image.ndim == 4:
+            ss_input_dict = defaultdict(list)
+            for bidx in range(len(image)):
+                pointmap_ = None
+                pointmap_dict = self.compute_pointmap(image[bidx], pointmap)
+                pointmap_ = pointmap_dict["pointmap"]
+                    # pts = _down_sample_img(pointmap_)
+                    # pts_colors = _down_sample_img(pointmap_dict["pts_color"])
+                ss_input_dict_ = preprocess_image(
+                        self, image[bidx], self.ss_preprocessor, pointmap=pointmap_, event_image=None if event_image is None else event_image[bidx]
+                    )
+                for k,v in ss_input_dict_.items():
+                    ss_input_dict[k].append(v)
+            ss_input_dict = {k: v if v[0] is None else torch.cat(v, dim=0) for k,v in ss_input_dict.items()}
+        else:
+            pointmap_dict = self.compute_pointmap(image, pointmap)
+            pointmap = pointmap_dict["pointmap"]
+                # pointmap = None
+            ss_input_dict = preprocess_image(
+                    self, image, self.ss_preprocessor, pointmap=pointmap, event_image=event_image
+                )
+            
+        # return image,ss_input_dict,pointmap_dict
+        return {
+            "image": image,
+            "ss_input_dict": ss_input_dict,
+            "pointmap_dict": pointmap_dict,
+        }
 
 
 class EncoderInferencePipelinePointMap(EncoderInferencePipeline):
