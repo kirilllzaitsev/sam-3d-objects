@@ -1080,7 +1080,7 @@ class SparseInferencePipeline(InferencePipeline):
             return ss_return_dict
 
     def sample_sparse_structure(
-        self, ss_input_dict: dict, inference_steps=None, use_distillation=False
+        self, ss_input_dict: dict, inference_steps=None, use_distillation=False, do_only_condition=False,
     ):
         ss_generator = self.models["ss_generator"]
         ss_decoder = self.models["ss_decoder"]
@@ -1122,6 +1122,11 @@ class SparseInferencePipeline(InferencePipeline):
                 ss_input_dict,
                 self.ss_condition_input_mapping,
             )
+            if do_only_condition:
+                return {
+                    "condition_args": condition_args,
+                    "condition_kwargs": condition_kwargs,
+                }
             return_dict = ss_generator(
                 latent_shape_dict,
                 image.device,
@@ -1199,7 +1204,7 @@ class EncoderInferencePipeline(InferencePipeline):
         )["tdfy"]["val_preprocessor"]
         return instantiate(config)
 
-    def init_ss_generator(self, ss_generator_config_path, ss_generator_ckpt_path):
+    def init_ss_generator(self, ss_generator_config_path, ss_generator_ckpt_path, **kwargs):
         return None
 
     def init_slat_generator(self, slat_generator_config_path, slat_generator_ckpt_path):
