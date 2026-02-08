@@ -309,8 +309,8 @@ class ShortCut(FlowMatching):
         flow_matching_indices = (d == 0).nonzero(as_tuple=False).squeeze(-1)  # 75% of the time use d=0 (flow matching), 25% use self-consistency
         self_consistency_indices = (d > 0).nonzero(as_tuple=False).squeeze(-1)
         if not use_sc:
-            flow_matching_indices = torch.arange(x1.shape[0], device=x1.device)
-            self_consistency_indices = torch.tensor([], device=x1.device)
+            flow_matching_indices = ((d == 0) | (d > 0)).nonzero(as_tuple=False).squeeze(-1)
+            self_consistency_indices = torch.tensor([], device=d.device)
         d[d == 0] = torch.rand_like(d[d == 0]) * self.fm_eps_max
         
         # Clear autocast cache for gradient computation
@@ -340,7 +340,7 @@ class ShortCut(FlowMatching):
             flow_matching_target = self._generate_target(x0_flow, x1_flow)
             
             flow_matching_loss = optree.tree_broadcast_map(
-                lambda fn, weight, pred, targ: weight * fn(pred, targ),
+                lambda fn, weight, pred, targ: weight * fn(pred.squeeze(), targ.squeeze()),
                 self.loss_fn,
                 self.loss_weights,
                 s_flow,
@@ -377,7 +377,7 @@ class ShortCut(FlowMatching):
             )
             
             self_consistency_loss = optree.tree_broadcast_map(
-                lambda fn, weight, pred, targ: weight * fn(pred, targ),
+                lambda fn, weight, pred, targ: weight * fn(pred.squeeze(), targ.squeeze()),
                 self.loss_fn,
                 self.loss_weights,
                 s_shortcut,
