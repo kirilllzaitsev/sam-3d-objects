@@ -299,6 +299,8 @@ class ShortCut(FlowMatching):
 
     def loss(self, x1: torch.Tensor, *args_conditionals, use_sc=True, **kwargs_conditionals):
         """Compute shortcut model loss with mixed flow matching and self-consistency objectives"""
+        if not use_sc:
+            return super().loss(x1, *args_conditionals, **kwargs_conditionals)
         # t, d = self._generate_t_and_d(x1)
         t = self._generate_t(x1)
         d = self._generate_d(x1)
@@ -308,9 +310,6 @@ class ShortCut(FlowMatching):
         # Determine which samples use flow matching vs  self-consistency
         flow_matching_indices = (d == 0).nonzero(as_tuple=False).squeeze(-1)  # 75% of the time use d=0 (flow matching), 25% use self-consistency
         self_consistency_indices = (d > 0).nonzero(as_tuple=False).squeeze(-1)
-        if not use_sc:
-            flow_matching_indices = ((d == 0) | (d > 0)).nonzero(as_tuple=False).squeeze(-1)
-            self_consistency_indices = torch.tensor([], device=d.device)
         d[d == 0] = torch.rand_like(d[d == 0]) * self.fm_eps_max
         
         # Clear autocast cache for gradient computation
@@ -395,6 +394,125 @@ class ShortCut(FlowMatching):
         }
         return total_loss, detail_losses
         
+
+    def loss_ts(self, x1: torch.Tensor, *args_conditionals, teacher_conditionals=None, **kwargs_conditionals):
+        """
+        Args:
+            x1: The Ground Truth Latent (from Sharp Data).
+            *args_conditionals: The Student inputs (e.g., Blurry RGB).
+            teacher_conditionals: (Optional) Tuple of Teacher inputs (e.g., Sharp RGB). 
+                                If None, defaults to args_conditionals (standard training).
+        """
+        # 1. Generate Noise/Time (Standard)
+        t = self._generate_t(x1)
+        d = self._generate_d(x1)
+        x0 = self._generate_x0(x1)
+        x_t = self._generate_xt(x0, x1, t)
+        
+        # 2. Split Indices
+        flow_matching_indices = (d == 0).nonzero(as_tuple=False).squeeze(-1)
+        self_consistency_indices = (d > 0).nonzero(as_tuple=False).squeeze(-1)
+        d[d == 0] = torch.rand_like(d[d == 0]) * self.fm_eps_max
+        
+        torch.clear_autocast_cache()
+        
+        # 3. STUDENT PREDICTION (The "Blurry" Path)
+        # We run the forward pass using the BLURRY conditionals
+        s = self.reverse_fn(
+            x_t,
+            t * self.time_scale,
+            *args_conditionals,         # <--- Input: Blurry RGB
+            d=2 * d * self.time_scale,
+            **kwargs_conditionals,
+        )
+
+        flow_matching_loss_val = torch.tensor(0.0, device=d.device, dtype=torch.float32)
+        self_consistency_loss_val = torch.tensor(0.0, device=d.device, dtype=torch.float32)
+        
+        # --- COMPONENT 1: FLOW MATCHING ---
+        # This remains mostly unchanged. x1 is already the Sharp Latent.
+        # The model learns to map "Blurry Input + Noise" -> "Sharp Latent"
+        if len(flow_matching_indices) > 0:
+            x0_flow = tree_tensor_map(lambda x: x[flow_matching_indices], x0)
+            x1_flow = tree_tensor_map(lambda x: x[flow_matching_indices], x1)
+            s_flow = tree_tensor_map(lambda x: x[flow_matching_indices], s)
+            
+            flow_matching_target = self._generate_target(x0_flow, x1_flow)
+            
+            flow_matching_loss = optree.tree_broadcast_map(
+                lambda fn, weight, pred, targ: weight * fn(pred.squeeze(), targ.squeeze()),
+                self.loss_fn,
+                self.loss_weights,
+                s_flow,
+                flow_matching_target,
+            )
+            flow_matching_loss_val = sum(optree.tree_flatten(flow_matching_loss)[0])
+        
+        # --- COMPONENT 2: SELF-CONSISTENCY (CRITICAL CHANGE) ---
+        if len(self_consistency_indices) > 0:
+            x_t_shortcut = tree_tensor_map(lambda x: x[self_consistency_indices], x_t)
+            t_shortcut = t[self_consistency_indices]
+            d_shortcut = d[self_consistency_indices]
+            s_shortcut = tree_tensor_map(lambda x: x[self_consistency_indices], s)
+            
+            # 4. PREPARE TEACHER CONDITIONALS
+            # If teacher_conditionals (Sharp) are provided, filter them by the indices
+            # and use them to compute the TARGET.
+            if teacher_conditionals is not None:
+                # Unpack Sharp RGB for the specific batch indices
+                args_target_shortcut = tuple(
+                    tree_tensor_map(lambda x: x[self_consistency_indices], arg) if torch.is_tensor(arg) else arg
+                    for arg in teacher_conditionals
+                )
+                # CAUTION: If kwargs_conditionals contains conditioning info (e.g. camera poses),
+                # make sure they are valid for the teacher too. Usually poses are shared.
+                kwargs_target_shortcut = {
+                    k: (tree_tensor_map(lambda x: x[self_consistency_indices], v) if torch.is_tensor(v) else v)
+                    for k, v in kwargs_conditionals.items()
+                }
+            else:
+                # Fallback for standard training (Student is its own Teacher)
+                if self.batch_mode:
+                    args_target_shortcut = args_conditionals
+                    kwargs_target_shortcut = kwargs_conditionals
+                else:
+                    args_target_shortcut = tuple(
+                        tree_tensor_map(lambda x: x[self_consistency_indices], arg) if torch.is_tensor(arg) else arg
+                        for arg in args_conditionals
+                    )
+                    kwargs_target_shortcut = {
+                        k: (tree_tensor_map(lambda x: x[self_consistency_indices], v) if torch.is_tensor(v) else v)
+                        for k, v in kwargs_conditionals.items()
+                    }
+
+            # 5. COMPUTE TARGET (The "Sharp" Path)
+            # We compute where the model *would* have gone if it saw the Sharp image
+            # Note: We usually wrap this in torch.no_grad() to stop gradients flowing into the target
+            with torch.no_grad():
+                self_consistency_target = self.compute_self_consistency_target(
+                    x_t_shortcut, t_shortcut, d_shortcut, 
+                    *args_target_shortcut,      # <--- Input: Sharp RGB
+                    **kwargs_target_shortcut
+                )
+            
+            # 6. CALCULATE LOSS
+            # Distance between "Blurry Prediction" and "Sharp Target"
+            self_consistency_loss = optree.tree_broadcast_map(
+                lambda fn, weight, pred, targ: weight * fn(pred.squeeze(), targ.squeeze()),
+                self.loss_fn,
+                self.loss_weights,
+                s_shortcut,
+                self_consistency_target,
+            )
+            self_consistency_loss_val = sum(optree.tree_flatten(self_consistency_loss)[0])
+        
+        total_loss = flow_matching_loss_val + self.shortcut_loss_weight * self_consistency_loss_val
+        
+        return total_loss, {
+            "flow_matching_loss": flow_matching_loss_val,
+            "self_consistency_loss": self_consistency_loss_val,
+        }
+
     def _prepare_t_and_d(self, steps=None):
         """Prepare time sequence and step size for inference"""
         steps = self.inference_steps if steps is None else steps

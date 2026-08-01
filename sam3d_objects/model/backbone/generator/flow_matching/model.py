@@ -170,7 +170,7 @@ class FlowMatching(Base):
 
         # broadcast & and compute loss
         loss = optree.tree_broadcast_map(
-            lambda fn, weight, pred, targ: weight * fn(pred, targ),
+            lambda fn, weight, pred, targ: weight * fn(pred.squeeze(), targ.squeeze()),
             self.loss_fn,
             self.loss_weights,
             prediction,

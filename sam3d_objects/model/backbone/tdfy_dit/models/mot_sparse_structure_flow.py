@@ -109,6 +109,8 @@ class SparseStructureFlowModel(nn.Module):
         if use_fp16:
             self.convert_to_fp16()
 
+        self.skip_block_idxs=[]
+
     @property
     def device(self) -> torch.device:
         """
@@ -188,6 +190,8 @@ class SparseStructureFlowModel(nn.Module):
             cond, event_tokens = cond[:, :-num_event_tokens], cond[:, -num_event_tokens:]
 
         for i, block in enumerate(self.blocks):
+            if i in self.skip_block_idxs:
+                continue
             if self.use_cattn_with_events and str(i) in self.rgbe_fuser.keys():
                 # 1. Gated Cross Attention y = y + tanh(alpha_xattn) * attention(q=y, kv=x) # 2. Gated Feed Forward (dense) Layer y = y + tanh(alpha_dense) * ffw(y)
                 cond = self.rgbe_fuser[str(i)](cond, event_tokens)
